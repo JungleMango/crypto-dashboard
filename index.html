@@ -398,3 +398,1152 @@
       label: "Default",
       windows: [{ enabled: true, len: 8 }, { enabled: true, len: 13 }, { enabled: true, len: 21 }, { enabled: true, len: 34 }],
       threshold: 0.35, minConviction: 60
+    },
+    "fast": {
+      label: "Fast Response",
+      windows: [{ enabled: true, len: 5 }, { enabled: true, len: 8 }, { enabled: true, len: 13 }, { enabled: true, len: 21 }],
+      threshold: 0.25, minConviction: 50
+    },
+    "smooth": {
+      label: "Smooth Trend",
+      windows: [{ enabled: true, len: 21 }, { enabled: true, len: 34 }, { enabled: true, len: 55 }, { enabled: true, len: 89 }],
+      threshold: 0.45, minConviction: 75
+    }
+  };
+
+  function spearmanRho(s, len) {
+    var sumd2 = 0;
+    for (var i = 0; i < len; i++) {
+      var pi = s[i], less = 0, eq = 0;
+      for (var j = 0; j < len; j++) {
+        var pj = s[j];
+        if (pj < pi) less++; else if (pj === pi) eq++;
+      }
+      var priceRank = less + (eq + 1) / 2;
+      var timeRank = len - i;
+      var d = priceRank - timeRank;
+      sumd2 += d * d;
+    }
+    var denom = len * len * len - len;
+    var rho = denom > 0 ? 1 - 6 * sumd2 / denom : 0;
+    return Math.max(-1, Math.min(1, rho));
+  }
+  function windowRho(closes, idx, len) {
+    if (idx < len) return null; // mirrors the script's own `bar_index >= len` gate, one bar more conservative than strictly needed
+    var slice = new Array(len);
+    for (var i = 0; i < len; i++) slice[i] = closes[idx - i];
+    return spearmanRho(slice, len);
+  }
+  function computeTrendSeries(closes, cfg) {
+    var n = closes.length;
+    var consensusArr = new Array(n), convictionArr = new Array(n), trendDirArr = new Array(n);
+    var trendDir = 0;
+    for (var idx = 0; idx < n; idx++) {
+      var rhos = [];
+      for (var w = 0; w < cfg.windows.length; w++) {
+        var win = cfg.windows[w];
+        if (!win.enabled) continue;
+        var r = windowRho(closes, idx, win.len);
+        if (r !== null) rhos.push(r);
+      }
+      var consensus = 0, conviction = 0, rawState = 0;
+      if (rhos.length > 0) {
+        var sum = 0; for (var k = 0; k < rhos.length; k++) sum += rhos[k];
+        consensus = sum / rhos.length;
+        var sgn = consensus >= 0 ? 1 : -1, agree = 0;
+        for (k = 0; k < rhos.length; k++) { if ((rhos[k] >= 0 ? 1 : -1) === sgn) agree++; }
+        conviction = 100 * agree / rhos.length;
+        if (consensus > cfg.threshold && conviction >= cfg.minConviction) rawState = 1;
+        else if (consensus < -cfg.threshold && conviction >= cfg.minConviction) rawState = -1;
+      }
+      trendDir = rawState !== 0 ? rawState : 0; // show_neutral = true (the script's default)
+      consensusArr[idx] = consensus;
+      convictionArr[idx] = conviction;
+      trendDirArr[idx] = trendDir;
+    }
+    return { consensusArr: consensusArr, convictionArr: convictionArr, trendDirArr: trendDirArr };
+  }
+
+  // Port of the "Adaptive Trend [Test 3]" Pine Script. All three shipped presets use
+  // ma_type = "EMA", so only EMA is implemented here (matches how the app exposes presets
+  // rather than the raw length/mult/fast/slow/ma_type controls).
+  var ADAPTIVE_PRESETS = {
+    "default": { label: "Default", length: 20, mult: 1.5, fast: 3, slow: 8 },
+    "fast": { label: "Fast Response", length: 12, mult: 1.0, fast: 2, slow: 5 },
+    "smooth": { label: "Smooth Trend", length: 30, mult: 2.0, fast: 5, slow: 13 }
+  };
+
+  function stdevPop(arr) {
+    var n = arr.length;
+    if (n === 0) return 0;
+    var mean = 0;
+    for (var i = 0; i < n; i++) mean += arr[i];
+    mean /= n;
+    var sumSq = 0;
+    for (i = 0; i < n; i++) { var d = arr[i] - mean; sumSq += d * d; }
+    return Math.sqrt(sumSq / n);
+  }
+
+  // Kaufman-style adaptive filter: alpha rises when net directional movement ("velocity") over the
+  // lookback is large relative to bar-to-bar volatility, so the line hugs price in a clean trend and
+  // lags heavily during chop. Mirrors the script's `kinetic_line` exactly (recursive, seeded at source).
+  function computeAdaptiveKinetic(values, length, mult) {
+    var n = values.length;
+    var kinetic = new Array(n);
+    kinetic[0] = values[0];
+    for (var i = 1; i < n; i++) {
+      if (i < length) {
+        // Not enough history for a full lookback window yet (Pine would show na too) — holding at
+        // source is a harmless stand-in for these warm-up bars, which sit far before the bars we read.
+        kinetic[i] = values[i];
+        continue;
+      }
+      var velocity = values[i] - values[i - length];
+      var diffs = new Array(length);
+      for (var k = 0; k < length; k++) {
+        var idx = i - length + 1 + k;
+        diffs[k] = values[idx] - values[idx - 1];
+      }
+      var volatility = stdevPop(diffs) * mult;
+      var denom = Math.abs(velocity) + volatility;
+      var alpha = denom === 0 ? 0 : Math.abs(velocity) / denom;
+      kinetic[i] = kinetic[i - 1] + alpha * (values[i] - kinetic[i - 1]);
+    }
+    return kinetic;
+  }
+
+  function emaArr(values, len) {
+    var n = values.length, out = new Array(n);
+    var alpha = 2 / (len + 1);
+    out[0] = values[0];
+    for (var i = 1; i < n; i++) out[i] = out[i - 1] + alpha * (values[i] - out[i - 1]);
+    return out;
+  }
+
+  // ribbon_fast/ribbon_slow are EMAs of the kinetic line; trend_up = fast>slow, acceleration =
+  // fast rising. The 4 combined states mirror the script's ribbonColor branches exactly:
+  //   trend_up && accel      -> bull_accel (strongest bullish, momentum building)
+  //   trend_up && !accel     -> bull_decel (still up, but momentum fading)
+  //   !trend_up && !accel    -> bear_accel (strongest bearish, momentum building)
+  //   !trend_up && accel     -> bear_decel (still down, but momentum fading)
+  function computeAdaptiveTrend(closes, cfg) {
+    var kinetic = computeAdaptiveKinetic(closes, cfg.length, cfg.mult);
+    var ribbonFast = emaArr(kinetic, cfg.fast);
+    var ribbonSlow = emaArr(kinetic, cfg.slow);
+    var n = closes.length;
+    var stateArr = new Array(n);
+    for (var i = 0; i < n; i++) {
+      var trendUp = ribbonFast[i] > ribbonSlow[i];
+      var accel = i > 0 ? ribbonFast[i] > ribbonFast[i - 1] : true;
+      stateArr[i] = trendUp ? (accel ? "bull_accel" : "bull_decel") : (accel ? "bear_decel" : "bear_accel");
+    }
+    return { kinetic: kinetic, ribbonFast: ribbonFast, ribbonSlow: ribbonSlow, stateArr: stateArr };
+  }
+
+  var ADAPTIVE_LABELS = { bull_accel: "BULL ACCEL", bull_decel: "BULL DECEL", bear_accel: "BEAR ACCEL", bear_decel: "BEAR DECEL" };
+  var ADAPTIVE_CLASSES = { bull_accel: "good", bull_decel: "warning", bear_accel: "critical", bear_decel: "warning" };
+  var ADAPTIVE_ARROWS = { bull_accel: "▲", bull_decel: "▲", bear_accel: "▼", bear_decel: "▼" };
+
+  var TIMEFRAMES = [
+    { key: "1m",  interval: "1m",  label: "1m",  windowLabel: "last 24m" },
+    { key: "5m",  interval: "5m",  label: "5m",  windowLabel: "last 2h" },
+    { key: "15m", interval: "15m", label: "15m", windowLabel: "last 6h" },
+    { key: "30m", interval: "30m", label: "30m", windowLabel: "last 12h" },
+    { key: "1h",  interval: "1h",  label: "1H",  windowLabel: "last 24h" },
+    { key: "4h",  interval: "4h",  label: "4H",  windowLabel: "last 4d" },
+    { key: "1d",  interval: "1d",  label: "1D",  windowLabel: "last 24d" }
+  ];
+  function findTimeframe(key) {
+    for (var i = 0; i < TIMEFRAMES.length; i++) { if (TIMEFRAMES[i].key === key) return TIMEFRAMES[i]; }
+    return TIMEFRAMES[0];
+  }
+
+  // Binance's open-interest history endpoint doesn't have a 1m bucket — 5m is the finest it offers,
+  // so that's the fallback whenever the price chart is set to 1m.
+  var OI_PERIOD_MAP = { "1m": "5m", "5m": "5m", "15m": "15m", "30m": "30m", "1h": "1h", "4h": "4h", "1d": "1d" };
+
+  var STORAGE_KEY = "binancePerpsWatchlist.v1";
+
+  function loadSymbols() {
+    try {
+      var raw = localStorage.getItem(STORAGE_KEY);
+      if (raw) {
+        var arr = JSON.parse(raw);
+        if (Array.isArray(arr)) return arr;
+      }
+    } catch (e) { /* storage unavailable — fall back to defaults */ }
+    return DEFAULT_SYMBOLS.slice();
+  }
+  function saveSymbols() {
+    try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state.symbols)); } catch (e) { /* ignore */ }
+  }
+
+  var state = {
+    symbols: loadSymbols(),
+    premium: {},   // symbol -> {markPrice, indexPrice, lastFundingRate, nextFundingTime}
+    ticker: {},    // symbol -> {priceChangePercent, lastPrice, highPrice, lowPrice, quoteVolume}
+    oi: {},        // symbol -> {openInterest}
+    oiHistory: {}, // symbol -> array of {t, oi} aligned to the current price timeframe (via OI_PERIOD_MAP)
+    spark: {},     // symbol -> array of {o,h,l,c} candles (last CANDLE_COUNT, for the price chart)
+    candlesFull: {},// symbol -> full candle history (KLINE_FETCH_LIMIT bars, incl. volume), feeds the trend indicator + volume-share stats
+    trend: {},     // symbol -> {consensusArr, convictionArr, trendDirArr} cached from computeTrendSeries, for the currently selected timeframe
+    adaptive: {},  // symbol -> {kinetic, ribbonFast, ribbonSlow, stateArr} cached from computeAdaptiveTrend, for the currently selected timeframe
+    closesByTf: {},  // symbol -> { tfKey: closes[] } — raw closes cached per timeframe, independent of the selected chart timeframe
+    trendMulti: {},  // symbol -> { tfKey: {dir, consensus, conviction} } — latest Trend reading per timeframe, for the table's multi-timeframe view
+    adaptiveMulti: {}, // symbol -> { tfKey: {state, fast, slow} } — latest Adaptive Trend reading per timeframe, for the table's multi-timeframe view
+    oiSignalSince: {}, // symbol -> {label, since} — tracks when the OI/Price classification last changed
+    timeframe: findTimeframe("1h"), // default 1H, matches the 24h stats shown alongside it
+    trendPreset: "default",
+    adaptivePreset: "default",
+    view: "cards"
+  };
+
+  var grid = document.getElementById("grid");
+  var tableBody = document.getElementById("tableBody");
+  var tableView = document.getElementById("tableView");
+  var statusText = document.getElementById("statusText");
+  var liveDot = document.getElementById("liveDot");
+
+  function fmtPrice(n) {
+    n = parseFloat(n);
+    if (isNaN(n)) return "—";
+    if (n >= 1000) return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+    if (n >= 1) return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+    return n.toLocaleString(undefined, { minimumFractionDigits: 4, maximumFractionDigits: 8 });
+  }
+  function fmtVol(v) {
+    var n = parseFloat(v);
+    if (isNaN(n)) return "—";
+    if (n >= 1e9) return (n / 1e9).toFixed(2) + "B";
+    if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+    if (n >= 1e3) return (n / 1e3).toFixed(2) + "K";
+    return n.toFixed(2);
+  }
+  function fmtFunding(r) {
+    if (r === undefined || r === null || isNaN(r)) return "—";
+    return (r * 100).toFixed(4) + "%";
+  }
+  function fmtCountdown(ms) {
+    if (!ms || ms <= 0) return "—";
+    var totalSec = Math.floor(ms / 1000);
+    var h = Math.floor(totalSec / 3600);
+    var m = Math.floor((totalSec % 3600) / 60);
+    var s = totalSec % 60;
+    return h + "h " + String(m).padStart(2, "0") + "m " + String(s).padStart(2, "0") + "s";
+  }
+  function fmtElapsed(ms) {
+    if (ms === null || ms === undefined || isNaN(ms) || ms < 0) return "—";
+    var totalMin = Math.floor(ms / 60000);
+    if (totalMin < 1) return "just now";
+    if (totalMin < 60) return totalMin + "m ago";
+    var totalHr = Math.floor(totalMin / 60);
+    if (totalHr < 24) return totalHr + "h " + (totalMin % 60) + "m ago";
+    var days = Math.floor(totalHr / 24);
+    return days + "d " + (totalHr % 24) + "h ago";
+  }
+  function volumeShare(candles, dailyQuoteVol) {
+    if (!candles || candles.length === 0 || !dailyQuoteVol) return null;
+    var daily = parseFloat(dailyQuoteVol);
+    if (!daily) return null;
+    // use the last fully-closed candle, not the one still forming — a partial
+    // candle would otherwise look artificially small early in its period
+    var idx = candles.length >= 2 ? candles.length - 2 : candles.length - 1;
+    var candle = candles[idx];
+    var partial = candles.length < 2;
+    return { pct: (candle.qv / daily) * 100, partial: partial };
+  }
+  // Relative volume: the last complete candle's volume vs. the average of the `count`
+  // candles immediately before it (that candle is excluded from its own baseline,
+  // otherwise a spike would partly average itself away). Works in whatever timeframe
+  // is currently selected since both sides come from the same candle set.
+  function relativeVolume(candlesFull, count) {
+    if (!candlesFull || candlesFull.length < 3) return null;
+    var complete = candlesFull.slice(0, -1); // drop the still-forming candle
+    if (complete.length < 2) return null;
+    var current = complete[complete.length - 1];
+    var baseline = complete.slice(0, -1).slice(-count);
+    if (baseline.length === 0) return null;
+    var sum = 0;
+    for (var i = 0; i < baseline.length; i++) sum += baseline[i].qv;
+    var avg = sum / baseline.length;
+    if (!avg) return null;
+    return { ratio: current.qv / avg, n: baseline.length };
+  }
+  function baseAsset(sym) { return sym.replace(/USDT$/, ""); }
+  function normalizeSymbol(raw) {
+    var s = raw.trim().toUpperCase().replace(/[_-]/g, "");
+    if (!s) return null;
+    if (!/USDT$/.test(s)) s = s + "USDT";
+    return s;
+  }
+
+  function seriesRange(values) {
+    if (!values || values.length < 1) return null;
+    var min = Math.min.apply(null, values), max = Math.max.apply(null, values);
+    return { min: min, max: max, mid: (min + max) / 2 };
+  }
+
+  function chartGridLines(w, h, padX, padY) {
+    var innerH = h - padY * 2;
+    var gridTopY = padY, gridMidY = padY + innerH / 2, gridBotY = h - padY;
+    return '<line x1="' + padX + '" y1="' + gridTopY.toFixed(2) + '" x2="' + (w - padX) + '" y2="' + gridTopY.toFixed(2) + '" stroke="var(--gridline)" stroke-width="0.4"/>' +
+      '<line x1="' + padX + '" y1="' + gridMidY.toFixed(2) + '" x2="' + (w - padX) + '" y2="' + gridMidY.toFixed(2) + '" stroke="var(--gridline)" stroke-width="0.4" stroke-dasharray="1.5,1.5"/>' +
+      '<line x1="' + padX + '" y1="' + gridBotY.toFixed(2) + '" x2="' + (w - padX) + '" y2="' + gridBotY.toFixed(2) + '" stroke="var(--gridline)" stroke-width="0.4"/>';
+  }
+
+  // Generic mini line+area chart for any numeric series (price closes, OI, whatever shares this geometry).
+  function seriesLineSVG(values) {
+    var w = CHART_W, h = CHART_H, padX = 2, padY = CHART_PAD_Y, innerH = h - padY * 2;
+    var gridLines = chartGridLines(w, h, padX, padY);
+
+    if (!values || values.length < 2) {
+      return '<svg class="spark" viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none">' + gridLines + '</svg>';
+    }
+
+    var range = seriesRange(values);
+    var min = range.min, max = range.max;
+    var span = (max - min) || 1;
+    var stepX = (w - padX * 2) / (values.length - 1);
+
+    function y(v) { return padY + innerH * (1 - (v - min) / span); }
+
+    var pts = values.map(function (v, i) { return [padX + i * stepX, y(v)]; });
+    var isGood = values[values.length - 1] >= values[0];
+    var color = isGood ? "var(--good)" : "var(--critical)";
+
+    var polyline = '<polyline points="' + pts.map(function (p) { return p[0].toFixed(2) + "," + p[1].toFixed(2); }).join(" ") + '" fill="none" stroke="' + color + '" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>';
+    var last = pts[pts.length - 1];
+    var dot = '<circle cx="' + last[0].toFixed(2) + '" cy="' + last[1].toFixed(2) + '" r="1.6" fill="' + color + '"/>';
+    var areaPts = pts.map(function (p) { return p[0].toFixed(2) + "," + p[1].toFixed(2); }).join(" ");
+    var area = '<polygon points="' + areaPts + ' ' + last[0].toFixed(2) + ',' + (h - padY).toFixed(2) + ' ' + pts[0][0].toFixed(2) + ',' + (h - padY).toFixed(2) + '" fill="' + color + '" fill-opacity="0.10" stroke="none"/>';
+
+    return '<svg class="spark" viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none">' + gridLines + area + polyline + dot + '</svg>';
+  }
+
+  function seriesChartHtml(values, fmtLabel) {
+    var range = seriesRange(values);
+    var labels = "";
+    if (range) {
+      labels =
+        '<span class="axis-label top">' + fmtLabel(range.max) + '</span>' +
+        '<span class="axis-label mid">' + fmtLabel(range.mid) + '</span>' +
+        '<span class="axis-label bottom">' + fmtLabel(range.min) + '</span>';
+    }
+    return '<div class="chart-wrap">' + seriesLineSVG(values) + labels + '</div>';
+  }
+
+  function candleChartHtml(candles) {
+    var values = candles ? candles.map(function (c) { return c.c; }) : null;
+    return seriesChartHtml(values, function (v) { return "$" + fmtPrice(v); });
+  }
+
+  // Classic OI-vs-price read: does open interest confirm the price move (new positions opening)
+  // or contradict it (positions closing, i.e. covering/liquidation)?
+  //   OI up   + price up   -> new longs opening      (confirmed bullish move)
+  //   OI up   + price down -> new shorts opening      (confirmed bearish move)
+  //   OI down + price up   -> short covering          (rally driven by exits, more fragile)
+  //   OI down + price down -> long liquidation        (decline driven by exits, more fragile)
+  function classifyOiPriceSignal(candles, oiHist) {
+    if (!candles || candles.length < 2 || !oiHist || oiHist.length < 2) {
+      return { label: "Not enough data", cls: "neutral", arrow: "●" };
+    }
+    var priceUp = candles[candles.length - 1].c >= candles[0].c;
+    var oiUp = oiHist[oiHist.length - 1].oi >= oiHist[0].oi;
+    if (oiUp && priceUp) return { label: "New Longs", cls: "good", arrow: "▲" };
+    if (oiUp && !priceUp) return { label: "New Shorts", cls: "critical", arrow: "▼" };
+    if (!oiUp && priceUp) return { label: "Short Covering", cls: "warning", arrow: "▲" };
+    return { label: "Long Liquidation", cls: "warning", arrow: "▼" };
+  }
+
+  function dirColor(dir) { return dir === 1 ? "var(--good)" : dir === -1 ? "var(--critical)" : "var(--ink-muted)"; }
+
+  function trendSVG(consensusArr, dirArr) {
+    if (!consensusArr || consensusArr.length < 2) {
+      return '<svg class="spark" viewBox="0 0 100 30" preserveAspectRatio="none"></svg>';
+    }
+    var w = 100, h = 30, padX = 2, padY = 2, innerH = h - padY * 2;
+    function y(v) { return padY + innerH * (1 - (v + 1) / 2); } // fixed -1..+1 scale, same as the script's own hlines
+    var n = consensusArr.length;
+    var stepX = (w - padX * 2) / (n - 1);
+    var pts = consensusArr.map(function (v, i) { return [padX + i * stepX, y(v)]; });
+    var zeroY = y(0);
+
+    var segs = "";
+    for (var i = 1; i < pts.length; i++) {
+      var color = dirColor(dirArr[i]);
+      segs += '<line x1="' + pts[i - 1][0].toFixed(2) + '" y1="' + pts[i - 1][1].toFixed(2) + '" x2="' + pts[i][0].toFixed(2) + '" y2="' + pts[i][1].toFixed(2) + '" stroke="' + color + '" stroke-width="1.4" stroke-linecap="round" vector-effect="non-scaling-stroke"/>';
+    }
+    var latestColor = dirColor(dirArr[dirArr.length - 1]);
+    var areaPts = pts.map(function (p) { return p[0].toFixed(2) + "," + p[1].toFixed(2); }).join(" ");
+    var area = '<polygon points="' + areaPts + ' ' + pts[pts.length - 1][0].toFixed(2) + ',' + zeroY.toFixed(2) + ' ' + pts[0][0].toFixed(2) + ',' + zeroY.toFixed(2) + '" fill="' + latestColor + '" fill-opacity="0.14" stroke="none"/>';
+    var zeroLine = '<line x1="' + padX + '" y1="' + zeroY.toFixed(2) + '" x2="' + (w - padX) + '" y2="' + zeroY.toFixed(2) + '" stroke="var(--gridline)" stroke-width="0.5"/>';
+
+    return '<svg class="spark" viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none">' + zeroLine + area + segs + '</svg>';
+  }
+
+  function render() {
+    if (state.symbols.length === 0) {
+      grid.innerHTML = '<div class="empty">No contracts in your watchlist. Add one above.</div>';
+      tableBody.innerHTML = "";
+      return;
+    }
+
+    var cardsHtml = "", rowsHtml = "";
+    var now = Date.now();
+
+    state.symbols.forEach(function (sym) {
+      var p = state.premium[sym];
+      var t = state.ticker[sym];
+      var oi = state.oi[sym];
+      var oiHist = state.oiHistory[sym];
+      var oiPeriod = OI_PERIOD_MAP[state.timeframe.key] || "5m";
+      var oiPeriodNote = oiPeriod === state.timeframe.key ? oiPeriod : oiPeriod + " (1m unavailable)";
+      var spark = state.spark[sym];
+      var oiPriceSignal = classifyOiPriceSignal(spark, oiHist);
+      var sigTrack = state.oiSignalSince[sym];
+      if (!sigTrack || sigTrack.label !== oiPriceSignal.label) {
+        sigTrack = { label: oiPriceSignal.label, since: now };
+        state.oiSignalSince[sym] = sigTrack;
+      }
+      var oiSignalAge = fmtElapsed(now - sigTrack.since);
+      var trend = state.trend[sym];
+      var adaptive = state.adaptive[sym];
+
+      if (!p || !t) {
+        cardsHtml += '<div class="card"><button class="remove" data-sym="' + sym + '">×</button>' +
+          '<div class="sym-row"><span class="sym">' + baseAsset(sym) + '</span><span class="quote">/USDT</span><span class="perp-tag">Perp</span></div>' +
+          '<div class="price" style="color:var(--ink-muted); font-size:15px;">loading…</div></div>';
+        rowsHtml += '<tr><td>' + baseAsset(sym) + '</td><td colspan="21" style="color:var(--ink-muted)">loading…</td></tr>';
+        return;
+      }
+
+      var change = parseFloat(t.priceChangePercent);
+      var isGood = change >= 0;
+      var badgeClass = isGood ? "good" : "critical";
+      var arrow = isGood ? "▲" : "▼";
+      var funding = parseFloat(p.lastFundingRate);
+      var fundingClass = funding >= 0 ? "good" : "critical";
+      var fundingArrow = funding >= 0 ? "▲" : "▼";
+      var countdown = fmtCountdown(p.nextFundingTime - now);
+      var oiVal = oi ? oi.openInterest : null;
+      var volShare = volumeShare(spark, t.quoteVolume);
+      var volShareText = volShare ? volShare.pct.toFixed(2) + "% of 24h" + (volShare.partial ? " (forming)" : "") : "—";
+      var rvol = relativeVolume(state.candlesFull[sym], CANDLE_COUNT);
+      var rvolText = rvol ? rvol.ratio.toFixed(2) + "x avg" : "—";
+      var rvolClass = !rvol ? "" : rvol.ratio >= 1.5 ? "good" : rvol.ratio <= 0.5 ? "critical" : "";
+
+      var trendDirVal = 0, trendConsensus = null, trendConviction = 0, trendChartHtml = "";
+      var trendLabel = "NEUTRAL", trendCls = "neutral", trendArrow = "●";
+      if (trend) {
+        var lastIdx = trend.consensusArr.length - 1;
+        trendDirVal = trend.trendDirArr[lastIdx];
+        trendConsensus = trend.consensusArr[lastIdx];
+        trendConviction = trend.convictionArr[lastIdx];
+        trendLabel = trendDirVal === 1 ? "BULLISH" : trendDirVal === -1 ? "BEARISH" : "NEUTRAL";
+        trendCls = trendDirVal === 1 ? "good" : trendDirVal === -1 ? "critical" : "neutral";
+        trendArrow = trendDirVal === 1 ? "▲" : trendDirVal === -1 ? "▼" : "●";
+        trendChartHtml = trendSVG(
+          trend.consensusArr.slice(-TREND_CHART_POINTS),
+          trend.trendDirArr.slice(-TREND_CHART_POINTS)
+        );
+      } else {
+        trendChartHtml = trendSVG(null, null);
+      }
+
+      var adaptiveState = null, adaptiveLabel = "—", adaptiveCls = "neutral", adaptiveArrow = "●";
+      var adaptiveFastVal = null, adaptiveSpreadPct = null, adaptiveChartHtml;
+      if (adaptive) {
+        var aLastIdx = adaptive.stateArr.length - 1;
+        adaptiveState = adaptive.stateArr[aLastIdx];
+        adaptiveFastVal = adaptive.ribbonFast[aLastIdx];
+        var adaptiveSlowVal = adaptive.ribbonSlow[aLastIdx];
+        adaptiveSpreadPct = adaptiveSlowVal ? (adaptiveFastVal - adaptiveSlowVal) / adaptiveSlowVal * 100 : null;
+        adaptiveLabel = ADAPTIVE_LABELS[adaptiveState];
+        adaptiveCls = ADAPTIVE_CLASSES[adaptiveState];
+        adaptiveArrow = ADAPTIVE_ARROWS[adaptiveState];
+        adaptiveChartHtml = seriesChartHtml(
+          adaptive.ribbonFast.slice(-TREND_CHART_POINTS),
+          function (v) { return "$" + fmtPrice(v); }
+        );
+      } else {
+        adaptiveChartHtml = seriesChartHtml(null, function (v) { return "$" + fmtPrice(v); });
+      }
+
+      var trendMultiHtml = TIMEFRAMES.map(function (tf, i) {
+        var cellCls = "grp-trend" + (i === 0 ? " grp-divider" : "");
+        var tm = state.trendMulti[sym] && state.trendMulti[sym][tf.key];
+        if (!tm) return '<td class="' + cellCls + '" style="text-align:center;color:var(--ink-muted);" title="Loading…">●</td>';
+        var cls = tm.dir === 1 ? "good" : tm.dir === -1 ? "critical" : "neutral";
+        var arrow = tm.dir === 1 ? "▲" : tm.dir === -1 ? "▼" : "●";
+        var label = tm.dir === 1 ? "BULLISH" : tm.dir === -1 ? "BEARISH" : "NEUTRAL";
+        var color = cls === "good" ? "var(--good)" : cls === "critical" ? "var(--critical)" : "var(--ink-muted)";
+        return '<td class="' + cellCls + '" style="text-align:center;color:' + color + ';" title="' + label + ' (' + tm.consensus.toFixed(2) + ')">' + arrow + '</td>';
+      }).join("");
+
+      var adaptiveMultiHtml = TIMEFRAMES.map(function (tf, i) {
+        var cellCls = "grp-adaptive" + (i === 0 ? " grp-divider" : "");
+        var am = state.adaptiveMulti[sym] && state.adaptiveMulti[sym][tf.key];
+        if (!am) return '<td class="' + cellCls + '" style="text-align:center;color:var(--ink-muted);" title="Loading…">●</td>';
+        var cls = ADAPTIVE_CLASSES[am.state];
+        var arrow = ADAPTIVE_ARROWS[am.state];
+        var label = ADAPTIVE_LABELS[am.state];
+        var color = cls === "good" ? "var(--good)" : cls === "critical" ? "var(--critical)" : "var(--warning)";
+        return '<td class="' + cellCls + '" style="text-align:center;color:' + color + ';" title="' + label + '">' + arrow + '</td>';
+      }).join("");
+
+      cardsHtml += '<div class="card">' +
+        '<button class="remove" data-sym="' + sym + '" title="Remove">×</button>' +
+        '<div class="sym-row"><span class="sym">' + baseAsset(sym) + '</span><span class="quote">/USDT</span><span class="perp-tag">Perp</span></div>' +
+        '<div class="price">$' + fmtPrice(p.markPrice) + '</div>' +
+        '<div class="mark-label">Mark Price</div>' +
+        '<span class="badge ' + badgeClass + '">' + arrow + ' ' + Math.abs(change).toFixed(2) + '% (24h)</span>' +
+        '<div class="tf-label">' + state.timeframe.label + ' candles &middot; ' + state.timeframe.windowLabel + '</div>' +
+        candleChartHtml(spark) +
+        '<div class="trend-head" style="margin-top:10px;"><span>Open Interest &middot; ' + oiPeriodNote + '</span><span class="trend-badge ' + oiPriceSignal.cls + '">' + oiPriceSignal.arrow + ' ' + oiPriceSignal.label + '</span></div>' +
+        '<div style="display:flex;justify-content:flex-end;font-size:10px;color:var(--ink-muted);margin:-3px 0 6px;">' + oiSignalAge + '</div>' +
+        seriesChartHtml(
+          oiHist ? oiHist.map(function (p) { return p.oi; }) : null,
+          function (v) { return fmtVol(v) + " " + baseAsset(sym); }
+        ) +
+        '<div class="funding-row">' +
+          '<div class="fr-left"><span>Funding rate</span><span class="countdown">next in ' + countdown + '</span></div>' +
+          '<b class="' + fundingClass + '">' + fundingArrow + ' ' + fmtFunding(funding) + '</b>' +
+        '</div>' +
+        '<div class="stats">' +
+          '<div><span>Open Interest</span><b>' + (oiVal !== null ? fmtVol(oiVal) + ' ' + baseAsset(sym) : '—') + '</b></div>' +
+          '<div><span>24h Vol</span><b>$' + fmtVol(t.quoteVolume) + '</b></div>' +
+          '<div><span>' + state.timeframe.label + ' Candle Vol Share</span><b>' + volShareText + '</b></div>' +
+          '<div><span>Rel. Volume (vs last ' + CANDLE_COUNT + '&times;' + state.timeframe.label + ')</span><b' + (rvolClass ? ' class="' + rvolClass + '"' : '') + '>' + rvolText + '</b></div>' +
+        '</div>' +
+        '<div class="trend-panel">' +
+          '<div class="trend-head"><span>Trend Indicator</span><span class="trend-badge ' + trendCls + '">' + trendArrow + ' ' + trendLabel + '</span></div>' +
+          trendChartHtml +
+          '<div class="trend-stats"><span>Consensus <b>' + (trendConsensus !== null ? trendConsensus.toFixed(2) : "—") + '</b></span><span>Conviction <b>' + (trend ? trendConviction.toFixed(0) + "%" : "—") + '</b></span></div>' +
+        '</div>' +
+        '<div class="trend-panel">' +
+          '<div class="trend-head"><span>Adaptive Trend</span><span class="trend-badge ' + adaptiveCls + '">' + adaptiveArrow + ' ' + adaptiveLabel + '</span></div>' +
+          adaptiveChartHtml +
+          '<div class="trend-stats"><span>Fast <b>' + (adaptiveFastVal !== null ? "$" + fmtPrice(adaptiveFastVal) : "—") + '</b></span><span>Spread <b>' + (adaptiveSpreadPct !== null ? (adaptiveSpreadPct >= 0 ? "+" : "") + adaptiveSpreadPct.toFixed(2) + "%" : "—") + '</b></span></div>' +
+        '</div>' +
+      '</div>';
+
+      rowsHtml += '<tr>' +
+        '<td>' + baseAsset(sym) + '/USDT Perp</td>' +
+        '<td style="color:' + (isGood ? "var(--good)" : "var(--critical)") + '">' + arrow + ' ' + Math.abs(change).toFixed(2) + '%</td>' +
+        '<td style="color:' + (rvolClass === "good" ? "var(--good)" : rvolClass === "critical" ? "var(--critical)" : "inherit") + '">' + rvolText + '</td>' +
+        '<td style="color:' + (oiPriceSignal.cls === "good" ? "var(--good)" : oiPriceSignal.cls === "critical" ? "var(--critical)" : oiPriceSignal.cls === "warning" ? "var(--warning)" : "var(--ink-muted)") + '">' + oiPriceSignal.arrow + ' ' + oiPriceSignal.label + ' <span style="color:var(--ink-muted);font-weight:400;">(' + oiSignalAge + ')</span></td>' +
+        '<td>$' + fmtVol(t.quoteVolume) + '</td>' +
+        '<td>' + volShareText + '</td>' +
+        trendMultiHtml +
+        adaptiveMultiHtml +
+        '<td class="grp-divider" style="color:' + (funding >= 0 ? "var(--good)" : "var(--critical)") + '">' + fmtFunding(funding) + '</td>' +
+        '<td>' + countdown + '</td>' +
+      '</tr>';
+    });
+
+    grid.innerHTML = cardsHtml;
+    tableBody.innerHTML = rowsHtml;
+    var tfVolHeader = document.getElementById("tfVolHeader");
+    if (tfVolHeader) tfVolHeader.textContent = state.timeframe.label + " Vol Share";
+    var tfRvolHeader = document.getElementById("tfRvolHeader");
+    if (tfRvolHeader) tfRvolHeader.textContent = "Rel. Vol (vs " + CANDLE_COUNT + "×" + state.timeframe.label + ")";
+
+    Array.prototype.forEach.call(grid.querySelectorAll(".remove"), function (btn) {
+      btn.addEventListener("click", function () { removeSymbol(btn.getAttribute("data-sym")); });
+    });
+  }
+
+  function setStatus(text, ok) {
+    statusText.textContent = text;
+    liveDot.classList.toggle("stale", !ok);
+  }
+
+  function fetchPremiumAndTicker() {
+    return Promise.all([
+      fetch("https://fapi.binance.com/fapi/v1/premiumIndex").then(function (r) {
+        if (!r.ok) throw new Error("premiumIndex HTTP " + r.status);
+        return r.json();
+      }),
+      fetch("https://fapi.binance.com/fapi/v1/ticker/24hr").then(function (r) {
+        if (!r.ok) throw new Error("ticker/24hr HTTP " + r.status);
+        return r.json();
+      })
+    ]).then(function (results) {
+      var premiumArr = results[0], tickerArr = results[1];
+      var wanted = {};
+      state.symbols.forEach(function (s) { wanted[s] = true; });
+      premiumArr.forEach(function (p) { if (wanted[p.symbol]) state.premium[p.symbol] = p; });
+      tickerArr.forEach(function (t) { if (wanted[t.symbol]) state.ticker[t.symbol] = t; });
+      setStatus("live · updated " + new Date().toLocaleTimeString(), true);
+      render();
+    }).catch(function (err) {
+      setStatus("couldn't reach Binance Futures (" + err.message + ") · retrying…", false);
+    });
+  }
+
+  function fetchOpenInterest(sym) {
+    return fetch("https://fapi.binance.com/fapi/v1/openInterest?symbol=" + sym)
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(function (d) { state.oi[sym] = d; render(); })
+      .catch(function () { /* keep previous OI on failure */ });
+  }
+  function fetchAllOpenInterest() {
+    state.symbols.forEach(fetchOpenInterest);
+    state.symbols.forEach(fetchOIHistory);
+  }
+
+  function fetchOIHistory(sym) {
+    var period = OI_PERIOD_MAP[state.timeframe.key] || "5m";
+    return fetch("https://fapi.binance.com/futures/data/openInterestHist?symbol=" + sym + "&period=" + period + "&limit=" + CANDLE_COUNT)
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(function (rows) {
+        state.oiHistory[sym] = rows.map(function (row) { return { t: row.timestamp, oi: parseFloat(row.sumOpenInterest) }; });
+        render();
+      })
+      .catch(function () { /* keep previous OI history on failure */ });
+  }
+
+  function fetchKlines(sym) {
+    var interval = state.timeframe.interval;
+    return fetch("https://fapi.binance.com/fapi/v1/klines?symbol=" + sym + "&interval=" + interval + "&limit=" + KLINE_FETCH_LIMIT)
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(function (rows) {
+        var candles = rows.map(function (row) {
+          return {
+            o: parseFloat(row[1]), h: parseFloat(row[2]), l: parseFloat(row[3]), c: parseFloat(row[4]),
+            qv: parseFloat(row[7]), // quote-asset (USDT) volume for this candle
+            closeTime: row[6]
+          };
+        });
+        state.spark[sym] = candles.slice(-CANDLE_COUNT);
+        state.candlesFull[sym] = candles;
+        computeTrendForSymbol(sym);
+        computeAdaptiveForSymbol(sym);
+        render();
+      })
+      .catch(function () { /* keep previous candles/trend on failure */ });
+  }
+  function fetchAllKlines() {
+    state.symbols.forEach(fetchKlines);
+  }
+
+  function computeTrendForSymbol(sym) {
+    var candles = state.candlesFull[sym];
+    if (!candles || candles.length < 10) { state.trend[sym] = null; return; }
+    var closes = candles.map(function (c) { return c.c; });
+    state.trend[sym] = computeTrendSeries(closes, TREND_PRESETS[state.trendPreset]);
+  }
+  function recomputeAllTrend() {
+    state.symbols.forEach(computeTrendForSymbol);
+  }
+
+  function computeAdaptiveForSymbol(sym) {
+    var candles = state.candlesFull[sym];
+    if (!candles || candles.length < 10) { state.adaptive[sym] = null; return; }
+    var closes = candles.map(function (c) { return c.c; });
+    state.adaptive[sym] = computeAdaptiveTrend(closes, ADAPTIVE_PRESETS[state.adaptivePreset]);
+  }
+  function recomputeAllAdaptive() {
+    state.symbols.forEach(computeAdaptiveForSymbol);
+  }
+
+  // Multi-timeframe trend (table view "Trend by Timeframe" columns) — fetches/caches closes per
+  // timeframe independently of state.timeframe, so all 7 columns can update at once regardless of
+  // which timeframe is selected for the price chart.
+  function fetchTrendKlines(sym, tf) {
+    return fetch("https://fapi.binance.com/fapi/v1/klines?symbol=" + sym + "&interval=" + tf.interval + "&limit=" + KLINE_FETCH_LIMIT)
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(function (rows) {
+        var closes = rows.map(function (row) { return parseFloat(row[4]); });
+        if (!state.closesByTf[sym]) state.closesByTf[sym] = {};
+        state.closesByTf[sym][tf.key] = closes;
+        computeTrendMultiForSymbolTf(sym, tf.key);
+        render();
+      })
+      .catch(function () { /* keep previous reading for this timeframe on failure */ });
+  }
+
+  function computeTrendMultiForSymbolTf(sym, tfKey) {
+    var closes = state.closesByTf[sym] && state.closesByTf[sym][tfKey];
+    if (!closes || closes.length < 10) return;
+    var series = computeTrendSeries(closes, TREND_PRESETS[state.trendPreset]);
+    var lastIdx = series.trendDirArr.length - 1;
+    if (!state.trendMulti[sym]) state.trendMulti[sym] = {};
+    state.trendMulti[sym][tfKey] = {
+      dir: series.trendDirArr[lastIdx],
+      consensus: series.consensusArr[lastIdx],
+      conviction: series.convictionArr[lastIdx]
+    };
+
+    // Same cached closes feed the Adaptive Trend multi-timeframe reading — no extra fetch needed.
+    var adaptive = computeAdaptiveTrend(closes, ADAPTIVE_PRESETS[state.adaptivePreset]);
+    var aLastIdx = adaptive.stateArr.length - 1;
+    if (!state.adaptiveMulti[sym]) state.adaptiveMulti[sym] = {};
+    state.adaptiveMulti[sym][tfKey] = {
+      state: adaptive.stateArr[aLastIdx],
+      fast: adaptive.ribbonFast[aLastIdx],
+      slow: adaptive.ribbonSlow[aLastIdx]
+    };
+  }
+
+  function fetchAllTrendMulti() {
+    state.symbols.forEach(function (sym) {
+      TIMEFRAMES.forEach(function (tf) { fetchTrendKlines(sym, tf); });
+    });
+  }
+
+  function recomputeAllTrendMulti() {
+    state.symbols.forEach(function (sym) {
+      TIMEFRAMES.forEach(function (tf) { computeTrendMultiForSymbolTf(sym, tf.key); });
+    });
+  }
+
+  function setTimeframe(tf) {
+    if (state.timeframe.key === tf.key) return;
+    state.timeframe = tf;
+    state.spark = {}; state.candlesFull = {}; state.trend = {}; state.oiHistory = {}; state.oiSignalSince = {}; // old candles are a different interval — drop rather than mix
+    renderTfGroup();
+    render();
+    fetchAllKlines();
+    fetchAllOpenInterest();
+  }
+
+  function renderTfGroup() {
+    var el = document.getElementById("tfGroup");
+    el.innerHTML = TIMEFRAMES.map(function (tf) {
+      return '<button data-tf="' + tf.key + '" class="' + (tf.key === state.timeframe.key ? "active" : "") + '">' + tf.label + '</button>';
+    }).join("");
+    Array.prototype.forEach.call(el.querySelectorAll("button"), function (btn) {
+      btn.addEventListener("click", function () {
+        var tf = TIMEFRAMES.filter(function (t) { return t.key === btn.getAttribute("data-tf"); })[0];
+        if (tf) setTimeframe(tf);
+      });
+    });
+  }
+
+  function addSymbol(raw) {
+    var s = normalizeSymbol(raw);
+    if (!s || state.symbols.indexOf(s) !== -1) return;
+    state.symbols.push(s);
+    saveSymbols();
+    render();
+    fetchPremiumAndTicker();
+    fetchOpenInterest(s);
+    fetchOIHistory(s);
+    fetchKlines(s);
+    TIMEFRAMES.forEach(function (tf) { fetchTrendKlines(s, tf); });
+  }
+
+  function removeSymbol(sym) {
+    state.symbols = state.symbols.filter(function (s) { return s !== sym; });
+    delete state.premium[sym]; delete state.ticker[sym]; delete state.oi[sym]; delete state.spark[sym];
+    delete state.candlesFull[sym]; delete state.trend[sym]; delete state.oiHistory[sym]; delete state.oiSignalSince[sym];
+    delete state.closesByTf[sym]; delete state.trendMulti[sym]; delete state.adaptive[sym]; delete state.adaptiveMulti[sym];
+    saveSymbols();
+    render();
+  }
+
+  function setTrendPreset(key) {
+    if (state.trendPreset === key || !TREND_PRESETS[key]) return;
+    state.trendPreset = key;
+    renderTrendPresetGroup();
+    recomputeAllTrend();
+    recomputeAllTrendMulti();
+    render();
+  }
+
+  function setAdaptivePreset(key) {
+    if (state.adaptivePreset === key || !ADAPTIVE_PRESETS[key]) return;
+    state.adaptivePreset = key;
+    renderAdaptivePresetGroup();
+    recomputeAllAdaptive();
+    recomputeAllTrendMulti(); // also recomputes adaptiveMulti, reusing the cached closes
+    render();
+  }
+
+  function renderTrendPresetGroup() {
+    var el = document.getElementById("trendPresetGroup");
+    if (!el) return;
+    el.innerHTML = Object.keys(TREND_PRESETS).map(function (key) {
+      var p = TREND_PRESETS[key];
+      return '<button data-preset="' + key + '" class="' + (key === state.trendPreset ? "active" : "") + '">' + p.label + '</button>';
+    }).join("");
+    Array.prototype.forEach.call(el.querySelectorAll("button"), function (btn) {
+      btn.addEventListener("click", function () { setTrendPreset(btn.getAttribute("data-preset")); });
+    });
+  }
+
+  function renderAdaptivePresetGroup() {
+    var el = document.getElementById("adaptivePresetGroup");
+    if (!el) return;
+    el.innerHTML = Object.keys(ADAPTIVE_PRESETS).map(function (key) {
+      var p = ADAPTIVE_PRESETS[key];
+      return '<button data-preset="' + key + '" class="' + (key === state.adaptivePreset ? "active" : "") + '">' + p.label + '</button>';
+    }).join("");
+    Array.prototype.forEach.call(el.querySelectorAll("button"), function (btn) {
+      btn.addEventListener("click", function () { setAdaptivePreset(btn.getAttribute("data-preset")); });
+    });
+  }
+
+  function renderTrendTfHeader() {
+    var el = document.getElementById("trendTfHeaderRow");
+    if (!el) return;
+    function tfLabels(groupCls) {
+      return TIMEFRAMES.map(function (tf, i) {
+        var cls = groupCls + (i === 0 ? " grp-divider" : "");
+        return '<th class="' + cls + '" style="text-align:center;">' + tf.label + '</th>';
+      }).join("");
+    }
+    // one sub-header row serves both colspan=7 groups above it (Trend, then Adaptive Trend)
+    el.innerHTML = tfLabels("grp-trend") + tfLabels("grp-adaptive");
+  }
+
+  document.getElementById("addBtn").addEventListener("click", function () {
+    var input = document.getElementById("symInput");
+    addSymbol(input.value);
+    input.value = "";
+  });
+  document.getElementById("symInput").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") { document.getElementById("addBtn").click(); }
+  });
+
+  document.getElementById("viewBtn").addEventListener("click", function () {
+    state.view = state.view === "cards" ? "table" : "cards";
+    grid.classList.toggle("hidden", state.view === "table");
+    tableView.classList.toggle("hidden", state.view === "cards");
+    this.textContent = state.view === "cards" ? "Table view" : "Card view";
+  });
+
+  document.getElementById("themeBtn").addEventListener("click", function () {
+    var root = document.documentElement;
+    var current = root.getAttribute("data-theme");
+    var prefersDark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+    var effectiveDark = current ? current === "dark" : prefersDark;
+    root.setAttribute("data-theme", effectiveDark ? "light" : "dark");
+  });
+
+  Array.prototype.forEach.call(document.querySelectorAll("#appTabs button"), function (btn) {
+    btn.addEventListener("click", function () {
+      var view = btn.getAttribute("data-view");
+      document.getElementById("perpSection").classList.toggle("hidden", view !== "perp");
+      document.getElementById("stockSection").classList.toggle("hidden", view !== "stocks");
+      Array.prototype.forEach.call(document.querySelectorAll("#appTabs button"), function (b) {
+        b.classList.toggle("active", b === btn);
+      });
+    });
+  });
+
+  renderTfGroup();
+  renderTrendPresetGroup();
+  renderAdaptivePresetGroup();
+  renderTrendTfHeader();
+  render();
+  fetchPremiumAndTicker();
+  fetchAllOpenInterest();
+  fetchAllKlines();
+  fetchAllTrendMulti();
+  setInterval(fetchPremiumAndTicker, 5000);
+  setInterval(fetchAllOpenInterest, 15000);
+  setInterval(fetchAllKlines, 60000);
+  setInterval(fetchAllTrendMulti, 60000);
+  setInterval(render, 1000); // keep funding countdowns ticking
+})();
+
+(function () {
+  "use strict";
+
+  var DEFAULT_STOCK_SYMBOLS = ["AAPL", "TSLA", "NVDA", "MSFT"];
+  var STOCK_STORAGE_KEY = "stockSentimentWatchlist.v1";
+  var APIKEY_STORAGE_KEY = "finnhubApiKey.v1";
+  var HISTORY_MAX = 60; // capped points kept per symbol for the sentiment sparkline
+
+  var QUOTE_INTERVAL = 30000;
+  var SENTIMENT_INTERVAL = 90000;
+  var NEWS_INTERVAL = 300000;
+
+  function loadStockSymbols() {
+    try {
+      var raw = localStorage.getItem(STOCK_STORAGE_KEY);
+      if (raw) {
+        var arr = JSON.parse(raw);
+        if (Array.isArray(arr)) return arr;
+      }
+    } catch (e) { /* storage unavailable — fall back to defaults */ }
+    return DEFAULT_STOCK_SYMBOLS.slice();
+  }
+  function saveStockSymbols() {
+    try { localStorage.setItem(STOCK_STORAGE_KEY, JSON.stringify(stock.symbols)); } catch (e) { /* ignore */ }
+  }
+  function loadApiKey() {
+    try { return localStorage.getItem(APIKEY_STORAGE_KEY) || ""; } catch (e) { return ""; }
+  }
+  function saveApiKey(key) {
+    try { localStorage.setItem(APIKEY_STORAGE_KEY, key); } catch (e) { /* ignore */ }
+  }
+
+  var stock = {
+    apiKey: loadApiKey(),
+    symbols: loadStockSymbols(),
+    quote: {},     // symbol -> {c,d,dp,h,l,o,pc}
+    sentiment: {}, // symbol -> {buzz:{articlesInLastWeek,buzz,weeklyAverage}, companyNewsScore, sentiment:{bearishPercent,bullishPercent}}
+    news: {},      // symbol -> array of {headline, source, url, datetime}
+    history: {},   // symbol -> array of {t, net} net sentiment score (-100..100) sampled each refresh
+    errors: {}     // symbol -> last error message, cleared on success
+  };
+
+  var stockGrid = document.getElementById("stockGrid");
+  var stockStatusText = document.getElementById("stockStatusText");
+  var stockLiveDot = document.getElementById("stockLiveDot");
+
+  function normalizeStockSymbol(raw) {
+    var s = raw.trim().toUpperCase().replace(/[^A-Z0-9.\-]/g, "");
+    return s || null;
+  }
+
+  function escapeHtml(s) {
+    return String(s === null || s === undefined ? "" : s).replace(/[&<>"']/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c];
+    });
+  }
+  function safeUrl(u) {
+    return typeof u === "string" && /^https:\/\//i.test(u) ? u : null;
+  }
+
+  function fmtPrice(n) {
+    n = parseFloat(n);
+    if (isNaN(n)) return "—";
+    if (n >= 1000) return n.toLocaleString(undefined, { maximumFractionDigits: 2 });
+    if (n >= 1) return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 });
+  }
+
+  function pad2(n) { return n < 10 ? "0" + n : "" + n; }
+  function isoDate(d) { return d.getFullYear() + "-" + pad2(d.getMonth() + 1) + "-" + pad2(d.getDate()); }
+  function timeAgo(ms) {
+    if (!ms || ms < 0) return "";
+    var min = Math.floor(ms / 60000);
+    if (min < 1) return "just now";
+    if (min < 60) return min + "m ago";
+    var hr = Math.floor(min / 60);
+    if (hr < 24) return hr + "h ago";
+    return Math.floor(hr / 24) + "d ago";
+  }
+
+  // Minimal fixed 0-100 domain sparkline for the net sentiment history — deliberately separate
+  // from the crypto dashboard's seriesLineSVG so this module stays self-contained.
+  function pctSparkline(values) {
+    var w = 100, h = 30, padX = 2, padY = 2, innerH = h - padY * 2;
+    if (!values || values.length < 2) {
+      return '<svg class="spark" viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none"></svg>';
+    }
+    function y(v) { return padY + innerH * (1 - (v + 100) / 200); } // -100..+100 scale
+    var stepX = (w - padX * 2) / (values.length - 1);
+    var pts = values.map(function (v, i) { return [padX + i * stepX, y(v)]; });
+    var zeroY = y(0);
+    var color = values[values.length - 1] >= 0 ? "var(--good)" : "var(--critical)";
+    var line = '<polyline points="' + pts.map(function (p) { return p[0].toFixed(2) + "," + p[1].toFixed(2); }).join(" ") + '" fill="none" stroke="' + color + '" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>';
+    var zeroLine = '<line x1="' + padX + '" y1="' + zeroY.toFixed(2) + '" x2="' + (w - padX) + '" y2="' + zeroY.toFixed(2) + '" stroke="var(--gridline)" stroke-width="0.5" stroke-dasharray="1.5,1.5"/>';
+    return '<svg class="spark" viewBox="0 0 ' + w + ' ' + h + '" preserveAspectRatio="none">' + zeroLine + line + '</svg>';
+  }
+
+  function finnhubGet(path) {
+    var sep = path.indexOf("?") === -1 ? "?" : "&";
+    return fetch("https://finnhub.io/api/v1/" + path + sep + "token=" + encodeURIComponent(stock.apiKey))
+      .then(function (r) {
+        if (r.status === 401) throw new Error("invalid API key");
+        if (r.status === 429) throw new Error("rate limited — back off a moment");
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.json();
+      });
+  }
+
+  function fetchStockQuote(sym) {
+    return finnhubGet("quote?symbol=" + sym).then(function (d) {
+      if (d && d.c) { stock.quote[sym] = d; delete stock.errors[sym]; }
+      renderStocks();
+    }).catch(function (err) { stock.errors[sym] = err.message; renderStocks(); });
+  }
+
+  function fetchStockSentiment(sym) {
+    return finnhubGet("news-sentiment?symbol=" + sym).then(function (d) {
+      stock.sentiment[sym] = d;
+      delete stock.errors[sym];
+      var bull = (d.sentiment && d.sentiment.bullishPercent || 0) * 100;
+      var bear = (d.sentiment && d.sentiment.bearishPercent || 0) * 100;
+      var net = bull - bear;
+      var hist = stock.history[sym] || (stock.history[sym] = []);
+      hist.push({ t: Date.now(), net: net });
+      if (hist.length > HISTORY_MAX) hist.splice(0, hist.length - HISTORY_MAX);
+      renderStocks();
+    }).catch(function (err) { stock.errors[sym] = err.message; renderStocks(); });
+  }
+
+  function fetchStockNews(sym) {
+    var to = new Date(), from = new Date(Date.now() - 7 * 86400000);
+    return finnhubGet("company-news?symbol=" + sym + "&from=" + isoDate(from) + "&to=" + isoDate(to)).then(function (rows) {
+      if (Array.isArray(rows)) {
+        rows.sort(function (a, b) { return b.datetime - a.datetime; });
+        stock.news[sym] = rows.slice(0, 5);
+        delete stock.errors[sym];
+      }
+      renderStocks();
+    }).catch(function (err) { stock.errors[sym] = err.message; renderStocks(); });
+  }
+
+  function fetchAllStockQuotes() { if (stock.apiKey) stock.symbols.forEach(fetchStockQuote); }
+  function fetchAllStockSentiment() {
+    if (!stock.apiKey) return;
+    stock.symbols.forEach(fetchStockSentiment);
+    updateStockStatus();
+  }
+  function fetchAllStockNews() { if (stock.apiKey) stock.symbols.forEach(fetchStockNews); }
+
+  function updateStockStatus() {
+    if (!stock.apiKey) { stockStatusText.textContent = "enter an API key to begin"; stockLiveDot.classList.add("stale"); return; }
+    if (stock.symbols.length === 0) { stockStatusText.textContent = "no tickers in your watchlist"; stockLiveDot.classList.add("stale"); return; }
+    var allInvalidKey = stock.symbols.length > 0 && stock.symbols.every(function (s) { return stock.errors[s] === "invalid API key"; });
+    if (allInvalidKey) { stockStatusText.textContent = "invalid API key — check your key at finnhub.io"; stockLiveDot.classList.add("stale"); return; }
+    stockStatusText.textContent = "live · updated " + new Date().toLocaleTimeString();
+    stockLiveDot.classList.remove("stale");
+  }
+
+  function sentimentClass(net) { return net > 15 ? "good" : net < -15 ? "critical" : "neutral"; }
+  function sentimentLabel(net) { return net > 15 ? "Bullish" : net < -15 ? "Bearish" : "Neutral"; }
+  function sentimentArrow(net) { return net > 15 ? "▲" : net < -15 ? "▼" : "●"; }
+
+  function buzzLabel(buzz) {
+    if (buzz === undefined || buzz === null) return { text: "—", cls: "neutral" };
+    if (buzz >= 1.5) return { text: "High buzz (" + buzz.toFixed(2) + "x)", cls: "good" };
+    if (buzz <= 0.5) return { text: "Quiet (" + buzz.toFixed(2) + "x)", cls: "neutral" };
+    return { text: "Normal (" + buzz.toFixed(2) + "x)", cls: "neutral" };
+  }
+
+  function renderStocks() {
+    if (stock.symbols.length === 0) {
+      stockGrid.innerHTML = '<div class="empty">No tickers in your watchlist. Add one above.</div>';
+      return;
+    }
+    var html = "";
+    stock.symbols.forEach(function (sym) {
+      html += '<div class="card"><button class="remove" data-stock="' + sym + '" title="Remove">×</button>' +
+        '<div class="sym-row"><span class="sym">' + sym + '</span></div>';
+
+      if (!stock.apiKey) {
+        html += '<div class="card-note">Enter and save your Finnhub API key above to load data.</div></div>';
+        return;
+      }
+      if (stock.errors[sym] && !stock.quote[sym] && !stock.sentiment[sym]) {
+        html += '<div class="card-err">' + stock.errors[sym] + '</div></div>';
+        return;
+      }
+
+      var q = stock.quote[sym];
+      if (q) {
+        var dp = parseFloat(q.dp);
+        var isGood = dp >= 0;
+        html += '<div class="price">$' + fmtPrice(q.c) + '</div>' +
+          '<span class="badge ' + (isGood ? "good" : "critical") + '">' + (isGood ? "▲" : "▼") + ' ' + Math.abs(dp).toFixed(2) + '% (day)</span>';
+      } else {
+        html += '<div class="card-note">loading price…</div>';
+      }
+
+      var s = stock.sentiment[sym];
+      if (s) {
+        var bull = (s.sentiment && s.sentiment.bullishPercent || 0) * 100;
+        var bear = (s.sentiment && s.sentiment.bearishPercent || 0) * 100;
+        var net = bull - bear;
+        var cls = sentimentClass(net);
+        var hist = stock.history[sym];
+        var histVals = hist ? hist.map(function (h) { return h.net; }) : null;
+
+        html += '<div class="trend-panel">' +
+          '<div class="trend-head"><span>News Sentiment</span><span class="trend-badge ' + cls + '">' + sentimentArrow(net) + ' ' + sentimentLabel(net) + '</span></div>' +
+          '<div class="sent-gauge-row"><div class="sent-gauge"><div class="fill ' + cls + '" style="width:' + Math.min(100, bull).toFixed(0) + '%;"></div></div>' +
+          '<span class="sent-pct">▲' + bull.toFixed(0) + '% / ▼' + bear.toFixed(0) + '%</span></div>' +
+          pctSparkline(histVals) +
+          '</div>';
+
+        var buzz = buzzLabel(s.buzz && s.buzz.buzz);
+        var articles = s.buzz ? s.buzz.articlesInLastWeek : null;
+        var newsScore = s.companyNewsScore !== undefined && s.companyNewsScore !== null ? Math.round(s.companyNewsScore * 100) : null;
+        html += '<div class="buzz-row"><span>' + buzz.text + (articles !== null ? ' &middot; ' + articles + ' articles/wk' : '') + '</span>' +
+          '<span>News score <b>' + (newsScore !== null ? newsScore : "—") + '</b></span></div>';
+      } else {
+        html += '<div class="card-note">loading sentiment…</div>';
+      }
+
+      var news = stock.news[sym];
+      if (news && news.length) {
+        html += '<div class="headline-list">' + news.map(function (n) {
+          var url = safeUrl(n.url);
+          var tag = url ? 'a href="' + escapeHtml(url) + '" target="_blank" rel="noopener noreferrer"' : "div";
+          var closeTag = url ? "a" : "div";
+          return '<' + tag + ' class="headline-item">' +
+            '<span class="h-title">' + escapeHtml(n.headline) + '</span>' +
+            '<span class="h-meta">' + escapeHtml(n.source || "") + ' &middot; ' + timeAgo(Date.now() - n.datetime * 1000) + '</span>' +
+            '</' + closeTag + '>';
+        }).join("") + '</div>';
+      }
+
+      html += '</div>';
+    });
+    stockGrid.innerHTML = html;
+    Array.prototype.forEach.call(stockGrid.querySelectorAll(".remove"), function (btn) {
+      btn.addEventListener("click", function () { removeStockSymbol(btn.getAttribute("data-stock")); });
+    });
+  }
+
+  function addStockSymbol(raw) {
+    var s = normalizeStockSymbol(raw);
+    if (!s || stock.symbols.indexOf(s) !== -1) return;
+    stock.symbols.push(s);
+    saveStockSymbols();
+    renderStocks();
+    if (stock.apiKey) { fetchStockQuote(s); fetchStockSentiment(s); fetchStockNews(s); }
+  }
+
+  function removeStockSymbol(sym) {
+    stock.symbols = stock.symbols.filter(function (s) { return s !== sym; });
+    delete stock.quote[sym]; delete stock.sentiment[sym]; delete stock.news[sym];
+    delete stock.history[sym]; delete stock.errors[sym];
+    saveStockSymbols();
+    renderStocks();
+  }
+
+  document.getElementById("addStockBtn").addEventListener("click", function () {
+    var input = document.getElementById("stockSymInput");
+    addStockSymbol(input.value);
+    input.value = "";
+  });
+  document.getElementById("stockSymInput").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") { document.getElementById("addStockBtn").click(); }
+  });
+
+  document.getElementById("saveKeyBtn").addEventListener("click", function () {
+    var input = document.getElementById("apiKeyInput");
+    stock.apiKey = input.value.trim();
+    saveApiKey(stock.apiKey);
+    stock.errors = {};
+    updateStockStatus();
+    fetchAllStockQuotes();
+    fetchAllStockSentiment();
+    fetchAllStockNews();
+  });
+
+  var apiKeyInput = document.getElementById("apiKeyInput");
+  if (stock.apiKey) apiKeyInput.value = stock.apiKey;
+
+  renderStocks();
+  updateStockStatus();
+  if (stock.apiKey) {
+    fetchAllStockQuotes();
+    fetchAllStockSentiment();
+    fetchAllStockNews();
+  }
+  setInterval(fetchAllStockQuotes, QUOTE_INTERVAL);
+  setInterval(fetchAllStockSentiment, SENTIMENT_INTERVAL);
+  setInterval(fetchAllStockNews, NEWS_INTERVAL);
+})();
+</script>
+</body>
+</html>
