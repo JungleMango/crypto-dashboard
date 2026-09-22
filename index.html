@@ -1,1 +1,400 @@
-test
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Binance Perpetuals Watchlist</title>
+<style>
+  :root {
+    color-scheme: light;
+    --surface:      #fcfcfb;
+    --plane:        #f9f9f7;
+    --ink-primary:  #0b0b0b;
+    --ink-secondary:#52514e;
+    --ink-muted:    #898781;
+    --gridline:     #e1e0d9;
+    --baseline:     #c3c2b7;
+    --border:       rgba(11,11,11,0.10);
+    --good:         #0ca30c;
+    --critical:     #d03b3b;
+    --good-bg:      rgba(12,163,12,0.10);
+    --critical-bg:  rgba(208,59,59,0.10);
+    --warning:      #b3790f;
+    --warning-bg:   rgba(179,121,15,0.14);
+    --accent:       #2a78d6;
+    --accent-bg:    rgba(42,120,214,0.10);
+    --accent2:      #4a3aa7;
+    --accent2-bg:   rgba(74,58,167,0.08);
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --surface:      #1a1a19;
+    --plane:        #0d0d0d;
+    --ink-primary:  #ffffff;
+    --ink-secondary:#c3c2b7;
+    --ink-muted:    #898781;
+    --gridline:     #2c2c2a;
+    --baseline:     #383835;
+    --border:       rgba(255,255,255,0.10);
+    --good:         #0ca30c;
+    --critical:     #d03b3b;
+    --good-bg:      rgba(12,163,12,0.16);
+    --critical-bg:  rgba(208,59,59,0.16);
+    --warning:      #eab308;
+    --warning-bg:   rgba(234,179,8,0.16);
+    --accent:       #3987e5;
+    --accent-bg:    rgba(57,135,229,0.16);
+    --accent2:      #9085e9;
+    --accent2-bg:   rgba(144,133,233,0.12);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --surface:      #1a1a19;
+      --plane:        #0d0d0d;
+      --ink-primary:  #ffffff;
+      --ink-secondary:#c3c2b7;
+      --ink-muted:    #898781;
+      --gridline:     #2c2c2a;
+      --baseline:     #383835;
+      --border:       rgba(255,255,255,0.10);
+      --good:         #0ca30c;
+      --critical:     #d03b3b;
+      --good-bg:      rgba(12,163,12,0.16);
+      --critical-bg:  rgba(208,59,59,0.16);
+      --warning:      #eab308;
+      --warning-bg:   rgba(234,179,8,0.16);
+      --accent:       #3987e5;
+      --accent-bg:    rgba(57,135,229,0.16);
+      --accent2:      #9085e9;
+      --accent2-bg:   rgba(144,133,233,0.12);
+    }
+  }
+
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--plane);
+    color: var(--ink-primary);
+    font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  body { min-height: 100vh; padding: 20px 16px 48px; }
+  .wrap { max-width: 1180px; margin: 0 auto; }
+
+  header {
+    display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+    gap: 12px; margin-bottom: 18px;
+  }
+  h1 { font-size: 19px; font-weight: 650; margin: 0; letter-spacing: -0.01em; }
+  .sub { font-size: 11.5px; color: var(--ink-muted); margin-top: 1px; }
+  .status-line { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--ink-muted); margin-top: 4px; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--good); animation: pulse 2s infinite; }
+  .dot.stale { background: var(--critical); animation: none; }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(12,163,12,0.45); }
+    70%  { box-shadow: 0 0 0 6px rgba(12,163,12,0); }
+    100% { box-shadow: 0 0 0 0 rgba(12,163,12,0); }
+  }
+
+  .controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .controls input[type="text"] {
+    background: var(--surface); color: var(--ink-primary);
+    border: 1px solid var(--border); border-radius: 7px;
+    padding: 7px 10px; font-size: 13px; width: 110px; font-family: inherit;
+  }
+  .controls input[type="text"]::placeholder { color: var(--ink-muted); }
+  button {
+    background: var(--surface); color: var(--ink-primary);
+    border: 1px solid var(--border); border-radius: 7px;
+    padding: 7px 12px; font-size: 13px; cursor: pointer; font-family: inherit;
+  }
+  button:hover { border-color: var(--ink-muted); }
+  button.ghost { color: var(--ink-secondary); }
+
+  .tf-group {
+    display: inline-flex; border: 1px solid var(--border); border-radius: 7px; overflow: hidden;
+  }
+  .tf-group button {
+    border: none; border-radius: 0; padding: 7px 10px; font-size: 12px;
+    border-right: 1px solid var(--border);
+  }
+  .tf-group button:last-child { border-right: none; }
+  .tf-group button.active { background: var(--accent-bg); color: var(--accent); font-weight: 650; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 12px; }
+
+  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px; position: relative; }
+  .card .remove {
+    position: absolute; top: 10px; right: 10px;
+    border: none; background: transparent; color: var(--ink-muted);
+    font-size: 15px; line-height: 1; padding: 2px 6px; cursor: pointer; border-radius: 5px;
+  }
+  .card .remove:hover { color: var(--ink-primary); background: var(--gridline); }
+
+  .sym-row { display: flex; align-items: baseline; gap: 6px; margin-bottom: 2px; }
+  .sym { font-size: 14px; font-weight: 650; letter-spacing: -0.01em; }
+  .quote { font-size: 11.5px; color: var(--ink-muted); }
+  .perp-tag {
+    font-size: 9.5px; font-weight: 700; letter-spacing: 0.04em; color: var(--accent);
+    background: var(--accent-bg); padding: 1px 5px; border-radius: 4px; text-transform: uppercase;
+  }
+
+  .price { font-size: 24px; font-weight: 650; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; margin: 4px 0 2px; }
+  .mark-label { font-size: 10.5px; color: var(--ink-muted); text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 6px; }
+
+  .badge {
+    display: inline-flex; align-items: center; gap: 4px;
+    font-size: 12.5px; font-weight: 600; padding: 2px 8px; border-radius: 999px; font-variant-numeric: tabular-nums;
+  }
+  .badge.good { color: var(--good); background: var(--good-bg); }
+  .badge.critical { color: var(--critical); background: var(--critical-bg); }
+
+  .tf-label { font-size: 10px; color: var(--ink-muted); text-transform: uppercase; letter-spacing: 0.04em; margin-top: 10px; }
+  .chart-wrap { position: relative; margin: 6px 0 10px; }
+  .spark { display: block; width: 100%; height: 60px; }
+  .axis-label {
+    position: absolute; right: 2px; font-size: 8.5px; font-variant-numeric: tabular-nums;
+    color: var(--ink-muted); background: var(--surface); padding: 0 3px; line-height: 1.4;
+    pointer-events: none;
+  }
+  .axis-label.top { top: 0; transform: translateY(-40%); }
+  .axis-label.mid { top: 50%; transform: translateY(-50%); }
+  .axis-label.bottom { bottom: 0; transform: translateY(40%); }
+
+  .funding-row {
+    display: flex; align-items: center; justify-content: space-between;
+    font-size: 12px; color: var(--ink-secondary); background: var(--gridline);
+    border-radius: 7px; padding: 6px 10px; margin: 8px 0 10px;
+  }
+  .funding-row .fr-left { display: flex; flex-direction: column; gap: 1px; }
+  .funding-row .countdown { font-size: 10px; color: var(--ink-muted); }
+  .funding-row b { font-variant-numeric: tabular-nums; }
+  .funding-row b.good { color: var(--good); }
+  .funding-row b.critical { color: var(--critical); }
+
+  .stats {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px;
+    font-size: 12px; color: var(--ink-secondary); border-top: 1px solid var(--gridline);
+    padding-top: 10px; margin-top: 2px;
+  }
+  .stats div span { display: block; color: var(--ink-muted); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; margin-bottom: 1px; }
+  .stats div b { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--ink-primary); }
+  .stats div b.good { color: var(--good); }
+  .stats div b.critical { color: var(--critical); }
+
+  .trend-panel { border-top: 1px solid var(--gridline); padding-top: 10px; margin-top: 10px; }
+  .trend-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+  .trend-head span:first-child { font-size: 10.5px; color: var(--ink-muted); text-transform: uppercase; letter-spacing: 0.04em; }
+  .trend-badge {
+    display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 700;
+    padding: 2px 8px; border-radius: 999px; letter-spacing: 0.02em;
+  }
+  .trend-badge.good { color: var(--good); background: var(--good-bg); }
+  .trend-badge.critical { color: var(--critical); background: var(--critical-bg); }
+  .trend-badge.neutral { color: var(--ink-muted); background: var(--gridline); }
+  .trend-badge.warning { color: var(--warning); background: var(--warning-bg); }
+  .trend-stats { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--ink-secondary); margin-top: 6px; }
+  .trend-stats b { font-variant-numeric: tabular-nums; color: var(--ink-primary); }
+
+  .empty { grid-column: 1 / -1; padding: 30px; text-align: center; color: var(--ink-muted); font-size: 13.5px; }
+
+  .table-scroll {
+    overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--surface);
+  }
+  table.view {
+    width: 100%; min-width: 980px; border-collapse: collapse; font-size: 12.5px;
+  }
+  table.view th, table.view td {
+    text-align: left; padding: 9px 11px; border-bottom: 1px solid var(--gridline);
+    font-variant-numeric: tabular-nums; white-space: nowrap;
+  }
+  table.view th { color: var(--ink-muted); font-weight: 600; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; }
+  table.view tr:last-child td { border-bottom: none; }
+  .hidden { display: none !important; }
+
+  /* Visually separate the two per-timeframe indicator blocks: a tinted column band each,
+     a colored underline on their group header, and a firm divider where each block starts. */
+  th.grp-trend, td.grp-trend { background: var(--accent-bg); }
+  th.grp-adaptive, td.grp-adaptive { background: var(--accent2-bg); }
+  table.view th.grp-trend, table.view th.grp-adaptive {
+    border-bottom-width: 3px; padding-bottom: 7px;
+  }
+  table.view th.grp-trend { border-bottom-color: var(--accent); }
+  table.view th.grp-adaptive { border-bottom-color: var(--accent2); }
+  .grp-label { display: inline-flex; align-items: center; gap: 5px; }
+  .grp-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+  .grp-dot.trend { background: var(--accent); }
+  .grp-dot.adaptive { background: var(--accent2); }
+  table.view .grp-divider { border-left: 2px solid var(--ink-muted); }
+
+  footer { margin-top: 22px; font-size: 11.5px; color: var(--ink-muted); text-align: center; line-height: 1.6; }
+
+  .legend { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 14px; overflow: hidden; }
+  .legend summary {
+    cursor: pointer; padding: 10px 14px; font-size: 12.5px; font-weight: 600; color: var(--ink-secondary);
+    display: flex; align-items: center; gap: 7px; list-style: none;
+  }
+  .legend summary::-webkit-details-marker { display: none; }
+  .legend summary::before { content: "▸"; font-size: 10px; color: var(--ink-muted); display: inline-block; transition: transform 0.15s; }
+  .legend[open] summary::before { transform: rotate(90deg); }
+  .legend-body { padding: 2px 14px 14px; border-top: 1px solid var(--gridline); }
+  .legend-body table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 10px; }
+  .legend-body th, .legend-body td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--gridline); }
+  .legend-body th { color: var(--ink-muted); font-weight: 600; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .legend-body tr:last-child td { border-bottom: none; }
+  .legend-body td.meaning { color: var(--ink-secondary); }
+
+  /* ---- Stock Sentiment Scanner ---- */
+  .app-tabs { display: inline-flex; border: 1px solid var(--border); border-radius: 7px; overflow: hidden; margin-bottom: 14px; }
+  .app-tabs button { border: none; border-radius: 0; padding: 8px 14px; font-size: 12.5px; border-right: 1px solid var(--border); }
+  .app-tabs button:last-child { border-right: none; }
+  .app-tabs button.active { background: var(--accent-bg); color: var(--accent); font-weight: 650; }
+
+  .controls input[type="password"] {
+    background: var(--surface); color: var(--ink-primary);
+    border: 1px solid var(--border); border-radius: 7px;
+    padding: 7px 10px; font-size: 13px; width: 170px; font-family: inherit;
+  }
+  .controls input[type="password"]::placeholder { color: var(--ink-muted); }
+
+  .apikey-note { font-size: 11px; color: var(--ink-muted); margin: -8px 0 14px; }
+  .apikey-note a { color: var(--accent); }
+
+  .sent-gauge-row { display: flex; align-items: center; gap: 8px; margin: 6px 0 4px; }
+  .sent-gauge { flex: 1; height: 8px; border-radius: 999px; background: var(--gridline); position: relative; overflow: hidden; }
+  .sent-gauge .fill { position: absolute; top: 0; bottom: 0; left: 0; border-radius: 999px; }
+  .sent-gauge .fill.good { background: var(--good); }
+  .sent-gauge .fill.critical { background: var(--critical); }
+  .sent-gauge .fill.neutral { background: var(--ink-muted); }
+  .sent-pct { font-size: 11px; color: var(--ink-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+  .buzz-row { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: var(--ink-secondary); margin: 8px 0; }
+
+  .headline-list { border-top: 1px solid var(--gridline); padding-top: 8px; margin-top: 8px; }
+  .headline-item { display: block; padding: 5px 0; border-bottom: 1px solid var(--gridline); text-decoration: none; color: inherit; }
+  .headline-item:last-child { border-bottom: none; }
+  .headline-item .h-title { font-size: 12px; color: var(--ink-primary); line-height: 1.35; display: block; }
+  .headline-item:hover .h-title { color: var(--accent); }
+  .headline-item .h-meta { font-size: 10px; color: var(--ink-muted); margin-top: 2px; display: block; }
+
+  .card-err { color: var(--critical); font-size: 12px; padding: 6px 0; }
+  .card-note { color: var(--ink-muted); font-size: 12px; padding: 6px 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="app-tabs" id="appTabs">
+    <button data-view="perp" class="active">Perpetuals</button>
+    <button data-view="stocks">Stock Sentiment</button>
+  </div>
+
+  <section id="perpSection">
+  <header>
+    <div>
+      <h1>Binance Perpetuals Watchlist</h1>
+      <div class="sub">USDT-margined perpetual futures &middot; Binance public Futures API</div>
+      <div class="status-line"><span class="dot" id="liveDot"></span><span id="statusText">connecting…</span></div>
+    </div>
+    <div class="controls">
+      <div class="tf-group" id="tfGroup"></div>
+      <div class="tf-group" id="trendPresetGroup"></div>
+      <div class="tf-group" id="adaptivePresetGroup"></div>
+      <input type="text" id="symInput" placeholder="e.g. DOGE" maxlength="12" />
+      <button id="addBtn">Add contract</button>
+      <button id="viewBtn" class="ghost">Table view</button>
+      <button id="themeBtn" class="ghost">Theme</button>
+    </div>
+  </header>
+
+  <details class="legend">
+    <summary>How to read the OI / Price signal</summary>
+    <div class="legend-body">
+      <table>
+        <thead><tr><th>Open Interest</th><th>Price</th><th>Signal</th></tr></thead>
+        <tbody>
+          <tr><td>Rising</td><td>Rising</td><td class="meaning"><span class="trend-badge good">▲ New Longs</span> &middot; new longs opening (confirmed bullish)</td></tr>
+          <tr><td>Rising</td><td>Falling</td><td class="meaning"><span class="trend-badge critical">▼ New Shorts</span> &middot; new shorts opening (confirmed bearish)</td></tr>
+          <tr><td>Falling</td><td>Rising</td><td class="meaning"><span class="trend-badge warning">▲ Short Covering</span> &middot; shorts closing out (fragile rally)</td></tr>
+          <tr><td>Falling</td><td>Falling</td><td class="meaning"><span class="trend-badge warning">▼ Long Liquidation</span> &middot; longs closing out (fragile decline)</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </details>
+
+  <div class="grid" id="grid"></div>
+  <div class="table-scroll hidden" id="tableView">
+    <table class="view">
+      <thead>
+        <tr>
+          <th rowspan="2">Contract</th><th rowspan="2">24h %</th><th rowspan="2" id="tfRvolHeader">Rel. Volume</th>
+          <th rowspan="2">OI/Price Signal</th><th rowspan="2">24h Vol (USDT)</th><th rowspan="2" id="tfVolHeader">TF Vol Share</th>
+          <th colspan="7" class="grp-trend grp-divider" style="text-align:center;"><span class="grp-label"><span class="grp-dot trend"></span>Trend by Timeframe</span></th>
+          <th colspan="7" class="grp-adaptive grp-divider" style="text-align:center;"><span class="grp-label"><span class="grp-dot adaptive"></span>Adaptive Trend by Timeframe</span></th>
+          <th rowspan="2" class="grp-divider">Funding</th><th rowspan="2">Next Funding</th>
+        </tr>
+        <tr id="trendTfHeaderRow"></tr>
+      </thead>
+      <tbody id="tableBody"></tbody>
+    </table>
+  </div>
+
+  <footer>
+    Data: Binance USD-M Futures public API (fapi.binance.com) &middot; mark/index/funding refresh every 5s &middot; open interest every 15s &middot; charts every 60s
+  </footer>
+  </section>
+
+  <section id="stockSection" class="hidden">
+    <header>
+      <div>
+        <h1>Stock Sentiment Scanner</h1>
+        <div class="sub">News-derived sentiment &middot; Finnhub public API</div>
+        <div class="status-line"><span class="dot" id="stockLiveDot"></span><span id="stockStatusText">enter an API key to begin</span></div>
+      </div>
+      <div class="controls">
+        <input type="password" id="apiKeyInput" placeholder="Finnhub API key" autocomplete="off" />
+        <button id="saveKeyBtn">Save key</button>
+        <input type="text" id="stockSymInput" placeholder="e.g. AAPL" maxlength="10" />
+        <button id="addStockBtn">Add ticker</button>
+      </div>
+    </header>
+    <div class="apikey-note">Get a free key at finnhub.io &middot; stored only in this browser's local storage, never sent anywhere but finnhub.io.</div>
+
+    <details class="legend">
+      <summary>How to read the sentiment scanner</summary>
+      <div class="legend-body">
+        <table>
+          <thead><tr><th>Metric</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td>Sentiment</td><td class="meaning">Share of the past week's news coverage classified bullish vs. bearish by Finnhub's model</td></tr>
+            <tr><td>Buzz</td><td class="meaning">This week's article volume vs. the stock's own weekly average (1.0x = normal)</td></tr>
+            <tr><td>News score</td><td class="meaning">Finnhub's composite score (0-100) for how favorably recent coverage skews</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </details>
+
+    <div class="grid" id="stockGrid"></div>
+
+    <footer>
+      Data: Finnhub news sentiment, quote &amp; company news APIs (finnhub.io) &middot; sentiment/quote refresh every 30-90s &middot; headlines every 5m &middot; requires your own free API key
+    </footer>
+  </section>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var DEFAULT_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT"];
+  var CANDLE_COUNT = 24; // candles shown in the price chart; the interval picked below decides the lookback window
+  var CHART_W = 100, CHART_H = 30, CHART_PAD_Y = 2; // shared viewBox geometry so axis labels line up with the plotted gridlines
+  var KLINE_FETCH_LIMIT = 200; // pulled once per refresh — 24 feed the price chart, the rest feed the trend indicator's lookback
+  var TREND_CHART_POINTS = 48; // how many recent trend readings to plot in the mini chart
+
+  // Port of the "Trend" Pine Script indicator (multi-timescale Spearman rank-correlation consensus).
+  // Each preset mirrors the script's own preset overrides exactly.
+  var TREND_PRESETS = {
+    "default": {
+      label: "Default",
+      windows: [{ enabled: true, len: 8 }, { enabled: true, len: 13 }, { enabled: true, len: 21 }, { enabled: true, len: 34 }],
+      threshold: 0.35, minConviction: 60
