@@ -48,6 +48,8 @@ show_pwhl   = input.bool(true,  'Previous Week High / Low', group = 'Higher Time
 show_tags  = input.bool(true, 'Show Level Tags',                     group = 'Level Tags')
 tag_offset = input.int(3,     'Tag Position (bars right of last candle)', minval = -50, maxval = 50, group = 'Level Tags')
 tag_size_s = input.string('Normal', 'Tag Size', options = ['Small', 'Normal', 'Large'], group = 'Level Tags')
+tag_merge  = input.float(0.6, 'Merge Tags Closer Than (x ATR)', step = 0.1, minval = 0, group = 'Level Tags',
+                         tooltip = 'Levels closer together than this share one tag, e.g. "4H R · PDH". Raise it if tags still overlap when zoomed out.')
 tag_size   = tag_size_s == 'Small' ? size.small : tag_size_s == 'Large' ? size.large : size.normal
 
 // Colors
@@ -117,8 +119,10 @@ var string last_l_type = '—'
 
 // A horizontal level: the line plus its name tag (tag sits ABOVE the line)
 type Level
-    line  ln
-    label lb
+    line   ln
+    label  lb
+    string txt
+    color  col
 
 f_new_tag(float price, string txt, color col) =>
     show_tags ? label.new(bar_index + tag_offset, price, txt, color = c_none, textcolor = col,
@@ -126,7 +130,7 @@ f_new_tag(float price, string txt, color col) =>
 
 f_add_level(array<Level> arr, int t, float price, color col, int w, string st, string txt, int max_n) =>
     array.push(arr, Level.new(line.new(t, price, time, price, xloc = xloc.bar_time, extend = extend.right, color = col, style = st, width = w),
-                              f_new_tag(price, txt, col)))
+                              f_new_tag(price, txt, col), txt, col))
     if array.size(arr) > max_n
         Level old = array.shift(arr)
         line.delete(old.ln)
@@ -149,10 +153,38 @@ f_check_broken(array<Level> arr, bool is_res) =>
                     line.set_color(lv.ln, color.new(color.gray, 50))
                 array.remove(arr, i)
 
-// Keep tags pinned next to the latest candle so they stay on screen
-f_move_tags(array<Level> arr) =>
-    for lv in arr
-        label.set_x(lv.lb, bar_index + tag_offset)
+f_same_col(color a, color b) =>
+    color.r(a) == color.r(b) and color.g(a) == color.g(b) and color.b(a) == color.b(b)
+
+// Pins every tag next to the latest candle, then merges tags whose levels are
+// too close together into a single tag on the highest level so none overlap
+f_layout_tags(array<Level> all, float thr) =>
+    int n = array.size(all)
+    if n > 0
+        array<float> prices = array.new<float>()
+        for lv in all
+            array.push(prices, line.get_y1(lv.ln))
+            label.set_x(lv.lb, bar_index + tag_offset)
+            label.set_text(lv.lb, lv.txt)
+            label.set_textcolor(lv.lb, lv.col)
+        array<int> idx = array.sort_indices(prices, order.ascending)
+        int i = 0
+        while i < n
+            float base  = array.get(prices, array.get(idx, i))
+            Level top   = array.get(all, array.get(idx, i))
+            string txt  = top.txt
+            bool  mixed = false
+            int   j     = i + 1
+            while j < n and array.get(prices, array.get(idx, j)) - base <= thr
+                Level lv = array.get(all, array.get(idx, j))
+                label.set_text(top.lb, '')
+                mixed := mixed or not f_same_col(lv.col, top.col)
+                txt   := lv.txt + ' · ' + txt
+                top   := lv
+                j     += 1
+            label.set_text(top.lb, txt)
+            label.set_textcolor(top.lb, mixed ? #d1d4dc : top.col)
+            i := j
 
 f_tf_name(string tf) =>
     int m = int(timeframe.in_seconds(tf) / 60)
@@ -232,7 +264,7 @@ f_key_level(Level old, int t0, float price, color col, string txt) =>
         line.delete(old.ln)
         label.delete(old.lb)
     Level.new(line.new(t0, price, time, price, xloc = xloc.bar_time, extend = extend.right, color = col, style = line.style_dotted, width = 2),
-              f_new_tag(price, txt, col))
+              f_new_tag(price, txt, col), txt, col)
 
 // Only draw timeframes that are actually higher than the chart
 htf1_on = show_htf1 and timeframe.in_seconds(htf1) > timeframe.in_seconds()
@@ -264,12 +296,21 @@ if barstate.islast
     if show_pwhl
         pwh_lv := f_key_level(pwh_lv, time('W'), pwh, c_week, 'PWH')
         pwl_lv := f_key_level(pwl_lv, time('W'), pwl, c_week, 'PWL')
-    f_move_tags(res_lines)
-    f_move_tags(sup_lines)
-    f_move_tags(h1_res)
-    f_move_tags(h1_sup)
-    f_move_tags(h2_res)
-    f_move_tags(h2_sup)
+    if show_tags
+        array<Level> all_lv = array.new<Level>()
+        array.concat(all_lv, res_lines)
+        array.concat(all_lv, sup_lines)
+        array.concat(all_lv, h1_res)
+        array.concat(all_lv, h1_sup)
+        array.concat(all_lv, h2_res)
+        array.concat(all_lv, h2_sup)
+        if show_pdhl
+            array.push(all_lv, pdh_lv)
+            array.push(all_lv, pdl_lv)
+        if show_pwhl
+            array.push(all_lv, pwh_lv)
+            array.push(all_lv, pwl_lv)
+        f_layout_tags(all_lv, tag_merge * xATR)
 
 // Trend state: 1 = Bullish, -1 = Bearish, 0 = Ranging / Mixed
 int trend_state = adx_val < adx_min ? 0 : close > trailing_stop and close > ema_val ? 1 : close < trailing_stop and close < ema_val ? -1 : 0
