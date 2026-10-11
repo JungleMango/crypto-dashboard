@@ -44,6 +44,12 @@ htf_count   = input.int(3,      'Max HTF Levels per Side',  minval = 1, maxval =
 show_pdhl   = input.bool(true,  'Previous Day High / Low',  group = 'Higher Timeframe Levels')
 show_pwhl   = input.bool(true,  'Previous Week High / Low', group = 'Higher Timeframe Levels')
 
+// Level Tags
+show_tags  = input.bool(true, 'Show Level Tags',                     group = 'Level Tags')
+tag_offset = input.int(3,     'Tag Position (bars right of last candle)', minval = -50, maxval = 50, group = 'Level Tags')
+tag_size_s = input.string('Normal', 'Tag Size', options = ['Small', 'Normal', 'Large'], group = 'Level Tags')
+tag_size   = tag_size_s == 'Small' ? size.small : tag_size_s == 'Large' ? size.large : size.normal
+
 // Colors
 c_bull = #00e676
 c_bear = #ff1744
@@ -109,31 +115,55 @@ var int    prev_pl_bar = na
 var string last_h_type = '—'
 var string last_l_type = '—'
 
-var array<line> res_lines = array.new<line>()
-var array<line> sup_lines = array.new<line>()
-var line tl_res = na
-var line tl_sup = na
+// A horizontal level: the line plus its name tag (tag sits ABOVE the line)
+type Level
+    line  ln
+    label lb
 
-f_add_level(arr, x, price, col, max_n) =>
-    array.push(arr, line.new(x, price, bar_index, price, extend = extend.right, color = col, style = line.style_dashed, width = 1))
+f_new_tag(float price, string txt, color col) =>
+    show_tags ? label.new(bar_index + tag_offset, price, txt, color = c_none, textcolor = col,
+                          style = label.style_label_down, size = tag_size) : na
+
+f_add_level(array<Level> arr, int t, float price, color col, int w, string st, string txt, int max_n) =>
+    array.push(arr, Level.new(line.new(t, price, time, price, xloc = xloc.bar_time, extend = extend.right, color = col, style = st, width = w),
+                              f_new_tag(price, txt, col)))
     if array.size(arr) > max_n
-        line.delete(array.shift(arr))
+        Level old = array.shift(arr)
+        line.delete(old.ln)
+        label.delete(old.lb)
 
 // A level is broken once price closes through it
-f_check_broken(arr, is_res) =>
+f_check_broken(array<Level> arr, bool is_res) =>
     if array.size(arr) > 0
         for i = array.size(arr) - 1 to 0
-            line ln  = array.get(arr, i)
-            float lvl = line.get_y1(ln)
+            Level lv  = array.get(arr, i)
+            float lvl = line.get_y1(lv.ln)
             if is_res ? close > lvl : close < lvl
+                label.delete(lv.lb)
                 if sr_del_broken
-                    line.delete(ln)
+                    line.delete(lv.ln)
                 else
-                    line.set_extend(ln, extend.none)
-                    line.set_x2(ln, bar_index)
-                    line.set_style(ln, line.style_dotted)
-                    line.set_color(ln, color.new(color.gray, 50))
+                    line.set_extend(lv.ln, extend.none)
+                    line.set_x2(lv.ln, time)
+                    line.set_style(lv.ln, line.style_dotted)
+                    line.set_color(lv.ln, color.new(color.gray, 50))
                 array.remove(arr, i)
+
+// Keep tags pinned next to the latest candle so they stay on screen
+f_move_tags(array<Level> arr) =>
+    for lv in arr
+        label.set_x(lv.lb, bar_index + tag_offset)
+
+f_tf_name(string tf) =>
+    int m = int(timeframe.in_seconds(tf) / 60)
+    m >= 1440 ? tf : m % 60 == 0 ? str.tostring(m / 60, '#') + 'H' : str.tostring(m) + 'm'
+
+chart_tf_name = f_tf_name(timeframe.period)
+
+var array<Level> res_lines = array.new<Level>()
+var array<Level> sup_lines = array.new<Level>()
+var line tl_res = na
+var line tl_sup = na
 
 // New swing high confirmed
 if not na(ph)
@@ -147,7 +177,7 @@ if not na(ph)
         label.new(last_ph_bar, ph, last_h_type, color = c_none, textcolor = last_h_type == 'HH' ? c_bull : c_bear,
                   style = label.style_label_down, size = size.small)
     if show_sr
-        f_add_level(res_lines, last_ph_bar, ph, c_res, sr_count)
+        f_add_level(res_lines, time[piv_len], ph, c_res, 1, line.style_dashed, chart_tf_name + ' R', sr_count)
     if show_tl
         // Lower high -> descending resistance trendline; higher high invalidates it
         line.delete(tl_res)
@@ -165,7 +195,7 @@ if not na(pl)
         label.new(last_pl_bar, pl, last_l_type, color = c_none, textcolor = last_l_type == 'HL' ? c_bull : c_bear,
                   style = label.style_label_up, size = size.small)
     if show_sr
-        f_add_level(sup_lines, last_pl_bar, pl, c_sup, sr_count)
+        f_add_level(sup_lines, time[piv_len], pl, c_sup, 1, line.style_dashed, chart_tf_name + ' S', sr_count)
     if show_tl
         // Higher low -> ascending support trendline; lower low invalidates it
         line.delete(tl_sup)
@@ -177,16 +207,8 @@ f_check_broken(sup_lines, false)
 // ═════════════════════════════════════════════════════════════════
 // HIGHER TIMEFRAME LEVELS (NON-REPAINTING: ONLY CONFIRMED HTF BARS)
 // ═════════════════════════════════════════════════════════════════
-type Level
-    line  ln
-    label lb
-
 c_day  = #2962ff
 c_week = #e040fb
-
-f_tf_name(string tf) =>
-    int m = int(timeframe.in_seconds(tf) / 60)
-    m >= 1440 ? tf : m % 60 == 0 ? str.tostring(m / 60, '#') + 'H' : str.tostring(m) + 'm'
 
 // Runs on the higher timeframe: latest confirmed pivot high/low and the time of its bar
 f_htf_piv(int len) =>
@@ -205,58 +227,30 @@ var array<Level> h1_sup = array.new<Level>()
 var array<Level> h2_res = array.new<Level>()
 var array<Level> h2_sup = array.new<Level>()
 
-f_add_htf(array<Level> arr, int t, float price, color col, int w, string txt) =>
-    array.push(arr, Level.new(line.new(t, price, time, price, xloc = xloc.bar_time, extend = extend.right, color = col, width = w),
-                              label.new(bar_index + 3, price, txt, color = c_none, textcolor = col, style = label.style_label_left, size = size.small)))
-    if array.size(arr) > htf_count
-        Level old = array.shift(arr)
-        line.delete(old.ln)
-        label.delete(old.lb)
-
-f_check_broken_htf(array<Level> arr, bool is_res) =>
-    if array.size(arr) > 0
-        for i = array.size(arr) - 1 to 0
-            Level lv  = array.get(arr, i)
-            float lvl = line.get_y1(lv.ln)
-            if is_res ? close > lvl : close < lvl
-                label.delete(lv.lb)
-                if sr_del_broken
-                    line.delete(lv.ln)
-                else
-                    line.set_extend(lv.ln, extend.none)
-                    line.set_x2(lv.ln, time)
-                    line.set_style(lv.ln, line.style_dotted)
-                    line.set_color(lv.ln, color.new(color.gray, 50))
-                array.remove(arr, i)
-
-f_move_labels(array<Level> arr) =>
-    for lv in arr
-        label.set_x(lv.lb, bar_index + 3)
-
 f_key_level(Level old, int t0, float price, color col, string txt) =>
     if not na(old)
         line.delete(old.ln)
         label.delete(old.lb)
     Level.new(line.new(t0, price, time, price, xloc = xloc.bar_time, extend = extend.right, color = col, style = line.style_dotted, width = 2),
-              label.new(bar_index + 3, price, txt, color = c_none, textcolor = col, style = label.style_label_left, size = size.small))
+              f_new_tag(price, txt, col))
 
 // Only draw timeframes that are actually higher than the chart
 htf1_on = show_htf1 and timeframe.in_seconds(htf1) > timeframe.in_seconds()
 htf2_on = show_htf2 and timeframe.in_seconds(htf2) > timeframe.in_seconds()
 
 if htf1_on and not na(h1_ph) and (na(h1_ph_t[1]) or h1_ph_t != h1_ph_t[1])
-    f_add_htf(h1_res, h1_ph_t, h1_ph, c_bear, 2, f_tf_name(htf1) + ' R')
+    f_add_level(h1_res, h1_ph_t, h1_ph, c_bear, 2, line.style_solid, f_tf_name(htf1) + ' R', htf_count)
 if htf1_on and not na(h1_pl) and (na(h1_pl_t[1]) or h1_pl_t != h1_pl_t[1])
-    f_add_htf(h1_sup, h1_pl_t, h1_pl, c_bull, 2, f_tf_name(htf1) + ' S')
+    f_add_level(h1_sup, h1_pl_t, h1_pl, c_bull, 2, line.style_solid, f_tf_name(htf1) + ' S', htf_count)
 if htf2_on and not na(h2_ph) and (na(h2_ph_t[1]) or h2_ph_t != h2_ph_t[1])
-    f_add_htf(h2_res, h2_ph_t, h2_ph, c_bear, 3, f_tf_name(htf2) + ' R')
+    f_add_level(h2_res, h2_ph_t, h2_ph, c_bear, 3, line.style_solid, f_tf_name(htf2) + ' R', htf_count)
 if htf2_on and not na(h2_pl) and (na(h2_pl_t[1]) or h2_pl_t != h2_pl_t[1])
-    f_add_htf(h2_sup, h2_pl_t, h2_pl, c_bull, 3, f_tf_name(htf2) + ' S')
+    f_add_level(h2_sup, h2_pl_t, h2_pl, c_bull, 3, line.style_solid, f_tf_name(htf2) + ' S', htf_count)
 
-f_check_broken_htf(h1_res, true)
-f_check_broken_htf(h1_sup, false)
-f_check_broken_htf(h2_res, true)
-f_check_broken_htf(h2_sup, false)
+f_check_broken(h1_res, true)
+f_check_broken(h1_sup, false)
+f_check_broken(h2_res, true)
+f_check_broken(h2_sup, false)
 
 var Level pdh_lv = na
 var Level pdl_lv = na
@@ -270,11 +264,12 @@ if barstate.islast
     if show_pwhl
         pwh_lv := f_key_level(pwh_lv, time('W'), pwh, c_week, 'PWH')
         pwl_lv := f_key_level(pwl_lv, time('W'), pwl, c_week, 'PWL')
-    // Keep HTF level tags pinned just right of the latest candle
-    f_move_labels(h1_res)
-    f_move_labels(h1_sup)
-    f_move_labels(h2_res)
-    f_move_labels(h2_sup)
+    f_move_tags(res_lines)
+    f_move_tags(sup_lines)
+    f_move_tags(h1_res)
+    f_move_tags(h1_sup)
+    f_move_tags(h2_res)
+    f_move_tags(h2_sup)
 
 // Trend state: 1 = Bullish, -1 = Bearish, 0 = Ranging / Mixed
 int trend_state = adx_val < adx_min ? 0 : close > trailing_stop and close > ema_val ? 1 : close < trailing_stop and close < ema_val ? -1 : 0
