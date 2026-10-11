@@ -34,6 +34,16 @@ show_tl       = input.bool(true,  'Show Trendlines',                    group = 
 color_bars    = input.bool(false, 'Color Candles by Trend',             group = 'Market Structure')
 show_bg       = input.bool(false, 'Trend Background',                   group = 'Market Structure')
 
+// Higher Timeframe Levels
+show_htf1   = input.bool(true,  'HTF 1 Levels',             inline = 'h1', group = 'Higher Timeframe Levels')
+htf1        = input.timeframe('60',  '',                    inline = 'h1', group = 'Higher Timeframe Levels')
+show_htf2   = input.bool(true,  'HTF 2 Levels',             inline = 'h2', group = 'Higher Timeframe Levels')
+htf2        = input.timeframe('240', '',                    inline = 'h2', group = 'Higher Timeframe Levels')
+htf_piv_len = input.int(5,      'HTF Pivot Strength',       minval = 2, group = 'Higher Timeframe Levels')
+htf_count   = input.int(3,      'Max HTF Levels per Side',  minval = 1, maxval = 10, group = 'Higher Timeframe Levels')
+show_pdhl   = input.bool(true,  'Previous Day High / Low',  group = 'Higher Timeframe Levels')
+show_pwhl   = input.bool(true,  'Previous Week High / Low', group = 'Higher Timeframe Levels')
+
 // Colors
 c_bull = #00e676
 c_bear = #ff1744
@@ -163,6 +173,108 @@ if not na(pl)
 
 f_check_broken(res_lines, true)
 f_check_broken(sup_lines, false)
+
+// ═════════════════════════════════════════════════════════════════
+// HIGHER TIMEFRAME LEVELS (NON-REPAINTING: ONLY CONFIRMED HTF BARS)
+// ═════════════════════════════════════════════════════════════════
+type Level
+    line  ln
+    label lb
+
+c_day  = #2962ff
+c_week = #e040fb
+
+f_tf_name(string tf) =>
+    int m = int(timeframe.in_seconds(tf) / 60)
+    m >= 1440 ? tf : m % 60 == 0 ? str.tostring(m / 60, '#') + 'H' : str.tostring(m) + 'm'
+
+// Runs on the higher timeframe: latest confirmed pivot high/low and the time of its bar
+f_htf_piv(int len) =>
+    float hp = ta.pivothigh(high, len, len)
+    float lp = ta.pivotlow(low, len, len)
+    [ta.valuewhen(not na(hp), hp, 0)[1], ta.valuewhen(not na(hp), time[len], 0)[1],
+     ta.valuewhen(not na(lp), lp, 0)[1], ta.valuewhen(not na(lp), time[len], 0)[1]]
+
+[h1_ph, h1_ph_t, h1_pl, h1_pl_t] = request.security(syminfo.tickerid, htf1, f_htf_piv(htf_piv_len), lookahead = barmerge.lookahead_on)
+[h2_ph, h2_ph_t, h2_pl, h2_pl_t] = request.security(syminfo.tickerid, htf2, f_htf_piv(htf_piv_len), lookahead = barmerge.lookahead_on)
+[pdh, pdl] = request.security(syminfo.tickerid, 'D', [high[1], low[1]], lookahead = barmerge.lookahead_on)
+[pwh, pwl] = request.security(syminfo.tickerid, 'W', [high[1], low[1]], lookahead = barmerge.lookahead_on)
+
+var array<Level> h1_res = array.new<Level>()
+var array<Level> h1_sup = array.new<Level>()
+var array<Level> h2_res = array.new<Level>()
+var array<Level> h2_sup = array.new<Level>()
+
+f_add_htf(array<Level> arr, int t, float price, color col, int w, string txt) =>
+    array.push(arr, Level.new(line.new(t, price, time, price, xloc = xloc.bar_time, extend = extend.right, color = col, width = w),
+                              label.new(bar_index + 3, price, txt, color = c_none, textcolor = col, style = label.style_label_left, size = size.small)))
+    if array.size(arr) > htf_count
+        Level old = array.shift(arr)
+        line.delete(old.ln)
+        label.delete(old.lb)
+
+f_check_broken_htf(array<Level> arr, bool is_res) =>
+    if array.size(arr) > 0
+        for i = array.size(arr) - 1 to 0
+            Level lv  = array.get(arr, i)
+            float lvl = line.get_y1(lv.ln)
+            if is_res ? close > lvl : close < lvl
+                label.delete(lv.lb)
+                if sr_del_broken
+                    line.delete(lv.ln)
+                else
+                    line.set_extend(lv.ln, extend.none)
+                    line.set_x2(lv.ln, time)
+                    line.set_style(lv.ln, line.style_dotted)
+                    line.set_color(lv.ln, color.new(color.gray, 50))
+                array.remove(arr, i)
+
+f_move_labels(array<Level> arr) =>
+    for lv in arr
+        label.set_x(lv.lb, bar_index + 3)
+
+f_key_level(Level old, int t0, float price, color col, string txt) =>
+    if not na(old)
+        line.delete(old.ln)
+        label.delete(old.lb)
+    Level.new(line.new(t0, price, time, price, xloc = xloc.bar_time, extend = extend.right, color = col, style = line.style_dotted, width = 2),
+              label.new(bar_index + 3, price, txt, color = c_none, textcolor = col, style = label.style_label_left, size = size.small))
+
+// Only draw timeframes that are actually higher than the chart
+htf1_on = show_htf1 and timeframe.in_seconds(htf1) > timeframe.in_seconds()
+htf2_on = show_htf2 and timeframe.in_seconds(htf2) > timeframe.in_seconds()
+
+if htf1_on and not na(h1_ph) and (na(h1_ph_t[1]) or h1_ph_t != h1_ph_t[1])
+    f_add_htf(h1_res, h1_ph_t, h1_ph, c_bear, 2, f_tf_name(htf1) + ' R')
+if htf1_on and not na(h1_pl) and (na(h1_pl_t[1]) or h1_pl_t != h1_pl_t[1])
+    f_add_htf(h1_sup, h1_pl_t, h1_pl, c_bull, 2, f_tf_name(htf1) + ' S')
+if htf2_on and not na(h2_ph) and (na(h2_ph_t[1]) or h2_ph_t != h2_ph_t[1])
+    f_add_htf(h2_res, h2_ph_t, h2_ph, c_bear, 3, f_tf_name(htf2) + ' R')
+if htf2_on and not na(h2_pl) and (na(h2_pl_t[1]) or h2_pl_t != h2_pl_t[1])
+    f_add_htf(h2_sup, h2_pl_t, h2_pl, c_bull, 3, f_tf_name(htf2) + ' S')
+
+f_check_broken_htf(h1_res, true)
+f_check_broken_htf(h1_sup, false)
+f_check_broken_htf(h2_res, true)
+f_check_broken_htf(h2_sup, false)
+
+var Level pdh_lv = na
+var Level pdl_lv = na
+var Level pwh_lv = na
+var Level pwl_lv = na
+
+if barstate.islast
+    if show_pdhl
+        pdh_lv := f_key_level(pdh_lv, time('D'), pdh, c_day, 'PDH')
+        pdl_lv := f_key_level(pdl_lv, time('D'), pdl, c_day, 'PDL')
+    if show_pwhl
+        pwh_lv := f_key_level(pwh_lv, time('W'), pwh, c_week, 'PWH')
+        pwl_lv := f_key_level(pwl_lv, time('W'), pwl, c_week, 'PWL')
+    // Keep HTF level tags pinned just right of the latest candle
+    f_move_labels(h1_res)
+    f_move_labels(h1_sup)
+    f_move_labels(h2_res)
+    f_move_labels(h2_sup)
 
 // Trend state: 1 = Bullish, -1 = Bearish, 0 = Ranging / Mixed
 int trend_state = adx_val < adx_min ? 0 : close > trailing_stop and close > ema_val ? 1 : close < trailing_stop and close < ema_val ? -1 : 0
