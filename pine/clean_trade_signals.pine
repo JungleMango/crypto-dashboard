@@ -1,0 +1,243 @@
+//@version=6
+indicator('Clean Trade Signals [Win-Lock & Auto-BE Engine]', overlay = true, max_bars_back = 500)
+
+// ═════════════════════════════════════════════════════════════════
+// SETTINGS
+// ═════════════════════════════════════════════════════════════════
+sensitivity = input.float(1.0, 'Sensitivity (Lower = More Signals)', step = 0.1, minval = 0.1)
+atr_period  = input.int(10,    'ATR Period', minval = 1)
+show_trail  = input.bool(true, 'Show Trailing Trend Line')
+show_stats  = input.bool(true, 'Show Win Rate Table', group = 'Stats Table')
+stats_pos   = input.string('Top Right', 'Table Position', options = ['Top Right', 'Top Left', 'Bottom Right', 'Bottom Left'], group = 'Stats Table')
+
+// Colors
+c_bull = #00e676
+c_bear = #ff1744
+
+// ═════════════════════════════════════════════════════════════════
+// CORE UT TRAILING STOP
+// ═════════════════════════════════════════════════════════════════
+xATR  = ta.atr(atr_period)
+nLoss = sensitivity * xATR
+
+var float trailing_stop = na
+if na(trailing_stop)
+    trailing_stop := close - nLoss
+else
+    if close > trailing_stop[1] and close[1] > trailing_stop[1]
+        trailing_stop := math.max(trailing_stop[1], close - nLoss)
+    else if close < trailing_stop[1] and close[1] < trailing_stop[1]
+        trailing_stop := math.min(trailing_stop[1], close + nLoss)
+    else if close > trailing_stop[1]
+        trailing_stop := close - nLoss
+    else
+        trailing_stop := close + nLoss
+
+raw_long  = ta.crossover(close, trailing_stop)
+raw_short = ta.crossunder(close, trailing_stop)
+
+// Structural Pivots
+pivot_high = ta.highest(high, 10)[1]
+pivot_low  = ta.lowest(low, 10)[1]
+
+// ═════════════════════════════════════════════════════════════════
+// TRADE TRACKER WITH IMMUTABLE WIN-LOCK
+// ═════════════════════════════════════════════════════════════════
+var label active_lbl   = na
+var int   t_dir        = 0      // 1: Long, -1: Short, 0: Idle
+var int   t_start_bar  = 0
+var float t_entry      = na
+var float t_tp1        = na
+var float t_tp2        = na
+var float t_tp3        = na
+var float t_sl         = na
+var bool  hit_tp1      = false
+var bool  hit_tp2      = false
+var bool  hit_tp3      = false
+var bool  hit_sl       = false
+var bool  be_locked    = false
+
+// Win/Loss Statistics (Win = TP1 touched, Loss = SL hit before TP1)
+var int long_wins    = 0
+var int long_losses  = 0
+var int short_wins   = 0
+var int short_losses = 0
+
+// Formatter for Card
+f_render_text(is_long, entry, tp1, tp2, tp3, sl, h1, h2, h3, hsl, is_be) =>
+    string header = is_long ? '🟢 LONG' : '🔴 SHORT'
+    string s_tp1  = 'TP1: ' + str.tostring(tp1, '#.#####') + (h1 ? ' ✅' : '')
+    string s_tp2  = 'TP2: ' + str.tostring(tp2, '#.#####') + (h2 ? ' ✅' : '')
+    string s_tp3  = 'TP3: ' + str.tostring(tp3, '#.#####') + (h3 ? ' ✅' : '')
+    string s_sl   = ''
+    if hsl
+        s_sl := 'SL: ' + str.tostring(sl, '#.#####') + ' ❌'
+    else if is_be
+        s_sl := 'SL: BREAKEVEN 🛡️'
+    else
+        s_sl := 'SL: ' + str.tostring(sl, '#.#####')
+
+    header + '\n' +
+      'ENTRY: ' + str.tostring(entry, '#.#####') + '\n' +
+      s_tp1 + '\n' +
+      s_tp2 + '\n' +
+      s_tp3 + '\n' +
+      s_sl
+
+// Check Active Trade Progress
+if t_dir == 1
+    // Long Evaluation
+    if not hit_tp1 and high >= t_tp1
+        hit_tp1   := true
+        be_locked := true  // Auto-Breakeven engaged!
+        t_sl      := t_entry
+        long_wins += 1     // Win is locked the moment TP1 is touched
+
+    if not hit_tp2 and high >= t_tp2
+        hit_tp2 := true
+
+    if not hit_tp3 and high >= t_tp3
+        hit_tp3 := true
+
+    // Only allow SL trigger if TP1 was NEVER touched and not on entry bar
+    if not hit_tp1 and not hit_sl and bar_index > t_start_bar and low <= t_sl
+        hit_sl      := true
+        t_dir       := 0  // Trade closed on SL
+        long_losses += 1
+
+    // If trade reached any TP, a later retracement closes trade safely at BE (no red X)
+    if hit_tp1 and low <= t_entry
+        t_dir := 0
+
+    // Full target completed
+    if hit_tp3
+        t_dir := 0
+
+    label.set_text(active_lbl, f_render_text(true, t_entry, t_tp1, t_tp2, t_tp3, t_sl, hit_tp1, hit_tp2, hit_tp3, hit_sl, be_locked))
+
+if t_dir == -1
+    // Short Evaluation
+    if not hit_tp1 and low <= t_tp1
+        hit_tp1    := true
+        be_locked  := true  // Auto-Breakeven engaged!
+        t_sl       := t_entry
+        short_wins += 1     // Win is locked the moment TP1 is touched
+
+    if not hit_tp2 and low <= t_tp2
+        hit_tp2 := true
+
+    if not hit_tp3 and low <= t_tp3
+        hit_tp3 := true
+
+    // Only allow SL trigger if TP1 was NEVER touched and not on entry bar
+    if not hit_tp1 and not hit_sl and bar_index > t_start_bar and high >= t_sl
+        hit_sl       := true
+        t_dir        := 0  // Trade closed on SL
+        short_losses += 1
+
+    // If trade reached any TP, a later retracement closes trade safely at BE (no red X)
+    if hit_tp1 and high >= t_entry
+        t_dir := 0
+
+    // Full target completed
+    if hit_tp3
+        t_dir := 0
+
+    label.set_text(active_lbl, f_render_text(false, t_entry, t_tp1, t_tp2, t_tp3, t_sl, hit_tp1, hit_tp2, hit_tp3, hit_sl, be_locked))
+
+// ═════════════════════════════════════════════════════════════════
+// ENTRY GATES (NO NEW TRADES UNTIL CURRENT RESOLVES)
+// ═════════════════════════════════════════════════════════════════
+can_enter = (t_dir == 0)
+
+valid_long  = raw_long  and can_enter
+valid_short = raw_short and can_enter
+
+if valid_long
+    t_dir       := 1
+    t_start_bar := bar_index
+    t_entry     := close
+    t_sl        := math.min(pivot_low, trailing_stop)
+    float risk  = t_entry - t_sl
+    t_tp1       := t_entry + (risk * 0.50)  // Rapid scalp win target
+    t_tp2       := math.max(t_entry + risk, pivot_high)
+    t_tp3       := t_entry + (risk * 2.0)
+    hit_tp1     := false
+    hit_tp2     := false
+    hit_tp3     := false
+    hit_sl      := false
+    be_locked   := false
+
+    string init_msg = f_render_text(true, t_entry, t_tp1, t_tp2, t_tp3, t_sl, false, false, false, false, false)
+    active_lbl := label.new(bar_index, low, text = init_msg, color = #0d2e1f, textcolor = c_bull,
+                            style = label.style_label_up, size = size.normal, textalign = text.align_left)
+
+if valid_short
+    t_dir       := -1
+    t_start_bar := bar_index
+    t_entry     := close
+    t_sl        := math.max(pivot_high, trailing_stop)
+    float risk  = t_sl - t_entry
+    t_tp1       := t_entry - (risk * 0.50)  // Rapid scalp win target
+    t_tp2       := math.min(t_entry - risk, pivot_low)
+    t_tp3       := t_entry - (risk * 2.0)
+    hit_tp1     := false
+    hit_tp2     := false
+    hit_tp3     := false
+    hit_sl      := false
+    be_locked   := false
+
+    string init_msg = f_render_text(false, t_entry, t_tp1, t_tp2, t_tp3, t_sl, false, false, false, false, false)
+    active_lbl := label.new(bar_index, high, text = init_msg, color = #380d16, textcolor = c_bear,
+                            style = label.style_label_down, size = size.normal, textalign = text.align_left)
+
+// ═════════════════════════════════════════════════════════════════
+// WIN RATE TABLE
+// ═════════════════════════════════════════════════════════════════
+f_table_pos(p) =>
+    switch p
+        'Top Left'     => position.top_left
+        'Bottom Right' => position.bottom_right
+        'Bottom Left'  => position.bottom_left
+        => position.top_right
+
+f_rate_str(wins, losses) =>
+    int total = wins + losses
+    total > 0 ? str.tostring(wins * 100.0 / total, '#.0') + '%' : '—'
+
+f_rate_color(wins, losses) =>
+    int total = wins + losses
+    total == 0 ? color.gray : (wins * 100.0 / total >= 50 ? c_bull : c_bear)
+
+f_row(tbl, row, name, name_col, wins, losses) =>
+    color txt = color.white
+    table.cell(tbl, 0, row, name,                              text_color = name_col, text_size = size.small, text_halign = text.align_left)
+    table.cell(tbl, 1, row, str.tostring(wins + losses),       text_color = txt,      text_size = size.small)
+    table.cell(tbl, 2, row, str.tostring(wins),                text_color = c_bull,   text_size = size.small)
+    table.cell(tbl, 3, row, str.tostring(losses),              text_color = c_bear,   text_size = size.small)
+    table.cell(tbl, 4, row, f_rate_str(wins, losses),          text_color = f_rate_color(wins, losses), text_size = size.small)
+
+var table stats_tbl = table.new(f_table_pos(stats_pos), 5, 4, bgcolor = #131722, border_color = #2a2e39, border_width = 1, frame_color = #2a2e39, frame_width = 1)
+
+if show_stats and barstate.islast
+    color hdr = #787b86
+    table.cell(stats_tbl, 0, 0, 'Side',     text_color = hdr, text_size = size.small, text_halign = text.align_left)
+    table.cell(stats_tbl, 1, 0, 'Trades',   text_color = hdr, text_size = size.small)
+    table.cell(stats_tbl, 2, 0, 'Wins',     text_color = hdr, text_size = size.small)
+    table.cell(stats_tbl, 3, 0, 'Losses',   text_color = hdr, text_size = size.small)
+    table.cell(stats_tbl, 4, 0, 'Win Rate', text_color = hdr, text_size = size.small)
+
+    f_row(stats_tbl, 1, '🟢 Long',  c_bull,      long_wins,                long_losses)
+    f_row(stats_tbl, 2, '🔴 Short', c_bear,      short_wins,               short_losses)
+    f_row(stats_tbl, 3, 'Total',    color.white, long_wins + short_wins,   long_losses + short_losses)
+
+// ═════════════════════════════════════════════════════════════════
+// PLOTS & ALERTS
+// ═════════════════════════════════════════════════════════════════
+plot(show_trail ? trailing_stop : na, 'Trend Line', 
+     color = close > trailing_stop ? c_bull : c_bear, 
+     linewidth = 2, 
+     style = plot.style_linebr)
+
+alertcondition(valid_long,  title = 'Long Entry',  message = 'LONG {{ticker}} @ {{close}}')
+alertcondition(valid_short, title = 'Short Entry', message = 'SHORT {{ticker}} @ {{close}}')
