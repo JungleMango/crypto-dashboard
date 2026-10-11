@@ -1,5 +1,5 @@
 //@version=6
-indicator('Clean Trade Signals [Win-Lock & Auto-BE Engine]', overlay = true, max_bars_back = 500)
+indicator('Clean Trade Signals [Win-Lock & Auto-BE Engine]', overlay = true, max_bars_back = 500, max_lines_count = 500, max_labels_count = 500)
 
 // ═════════════════════════════════════════════════════════════════
 // SETTINGS
@@ -23,6 +23,16 @@ htf       = input.timeframe('60', 'Higher Timeframe', group = 'Filters')
 htf_len   = input.int(50,     'Higher TF EMA Length', minval = 1, group = 'Filters')
 min_risk  = input.float(0.5,  'Min Risk (x ATR)',   step = 0.1, minval = 0, group = 'Filters')
 sl_buffer = input.float(0.2,  'SL Buffer (x ATR)',  step = 0.1, minval = 0, group = 'Filters')
+
+// Market Structure
+show_sr       = input.bool(true,  'Show Support / Resistance',          group = 'Market Structure')
+piv_len       = input.int(10,     'Pivot Strength (bars each side)',    minval = 2, group = 'Market Structure')
+sr_count      = input.int(4,      'Max Levels per Side',                minval = 1, maxval = 20, group = 'Market Structure')
+sr_del_broken = input.bool(false, 'Delete Broken Levels (else fade them)', group = 'Market Structure')
+show_swings   = input.bool(true,  'Show Reversal Points (HH / HL / LH / LL)', group = 'Market Structure')
+show_tl       = input.bool(true,  'Show Trendlines',                    group = 'Market Structure')
+color_bars    = input.bool(false, 'Color Candles by Trend',             group = 'Market Structure')
+show_bg       = input.bool(false, 'Trend Background',                   group = 'Market Structure')
 
 // Colors
 c_bull = #00e676
@@ -67,6 +77,96 @@ short_sl_est = math.max(pivot_high, trailing_stop) + sl_buffer * xATR
 
 long_ok  = (not use_ema or close > ema_val) and (not use_adx or adx_val > adx_min) and (not use_htf or close > htf_ema) and (close - long_sl_est)  >= min_risk * xATR
 short_ok = (not use_ema or close < ema_val) and (not use_adx or adx_val > adx_min) and (not use_htf or close < htf_ema) and (short_sl_est - close) >= min_risk * xATR
+
+// ═════════════════════════════════════════════════════════════════
+// MARKET STRUCTURE: REVERSAL POINTS, S/R LEVELS & TRENDLINES
+// ═════════════════════════════════════════════════════════════════
+c_res  = color.new(c_bear, 30)
+c_sup  = color.new(c_bull, 30)
+c_none = color.new(color.white, 100)
+
+ph = ta.pivothigh(high, piv_len, piv_len)
+pl = ta.pivotlow(low, piv_len, piv_len)
+
+var float  last_ph     = na
+var float  prev_ph     = na
+var int    last_ph_bar = na
+var int    prev_ph_bar = na
+var float  last_pl     = na
+var float  prev_pl     = na
+var int    last_pl_bar = na
+var int    prev_pl_bar = na
+var string last_h_type = '—'
+var string last_l_type = '—'
+
+var array<line> res_lines = array.new<line>()
+var array<line> sup_lines = array.new<line>()
+var line tl_res = na
+var line tl_sup = na
+
+f_add_level(arr, x, price, col, max_n) =>
+    array.push(arr, line.new(x, price, bar_index, price, extend = extend.right, color = col, style = line.style_dashed, width = 1))
+    if array.size(arr) > max_n
+        line.delete(array.shift(arr))
+
+// A level is broken once price closes through it
+f_check_broken(arr, is_res) =>
+    if array.size(arr) > 0
+        for i = array.size(arr) - 1 to 0
+            line ln  = array.get(arr, i)
+            float lvl = line.get_y1(ln)
+            if is_res ? close > lvl : close < lvl
+                if sr_del_broken
+                    line.delete(ln)
+                else
+                    line.set_extend(ln, extend.none)
+                    line.set_x2(ln, bar_index)
+                    line.set_style(ln, line.style_dotted)
+                    line.set_color(ln, color.new(color.gray, 50))
+                array.remove(arr, i)
+
+// New swing high confirmed
+if not na(ph)
+    prev_ph     := last_ph
+    prev_ph_bar := last_ph_bar
+    last_ph     := ph
+    last_ph_bar := bar_index - piv_len
+    last_h_type := na(prev_ph) ? 'H' : ph > prev_ph ? 'HH' : 'LH'
+
+    if show_swings
+        label.new(last_ph_bar, ph, last_h_type, color = c_none, textcolor = last_h_type == 'HH' ? c_bull : c_bear,
+                  style = label.style_label_down, size = size.small)
+    if show_sr
+        f_add_level(res_lines, last_ph_bar, ph, c_res, sr_count)
+    if show_tl
+        // Lower high -> descending resistance trendline; higher high invalidates it
+        line.delete(tl_res)
+        tl_res := last_h_type == 'LH' ? line.new(prev_ph_bar, prev_ph, last_ph_bar, ph, extend = extend.right, color = c_bear, width = 2) : na
+
+// New swing low confirmed
+if not na(pl)
+    prev_pl     := last_pl
+    prev_pl_bar := last_pl_bar
+    last_pl     := pl
+    last_pl_bar := bar_index - piv_len
+    last_l_type := na(prev_pl) ? 'L' : pl > prev_pl ? 'HL' : 'LL'
+
+    if show_swings
+        label.new(last_pl_bar, pl, last_l_type, color = c_none, textcolor = last_l_type == 'HL' ? c_bull : c_bear,
+                  style = label.style_label_up, size = size.small)
+    if show_sr
+        f_add_level(sup_lines, last_pl_bar, pl, c_sup, sr_count)
+    if show_tl
+        // Higher low -> ascending support trendline; lower low invalidates it
+        line.delete(tl_sup)
+        tl_sup := last_l_type == 'HL' ? line.new(prev_pl_bar, prev_pl, last_pl_bar, pl, extend = extend.right, color = c_bull, width = 2) : na
+
+f_check_broken(res_lines, true)
+f_check_broken(sup_lines, false)
+
+// Trend state: 1 = Bullish, -1 = Bearish, 0 = Ranging / Mixed
+int trend_state = adx_val < adx_min ? 0 : close > trailing_stop and close > ema_val ? 1 : close < trailing_stop and close < ema_val ? -1 : 0
+int ms_trend    = last_h_type == 'HH' and last_l_type == 'HL' ? 1 : last_h_type == 'LH' and last_l_type == 'LL' ? -1 : 0
 
 // ═════════════════════════════════════════════════════════════════
 // TRADE TRACKER WITH IMMUTABLE WIN-LOCK
@@ -257,7 +357,7 @@ f_row(tbl, row, name, name_col, wins, losses) =>
     table.cell(tbl, 3, row, str.tostring(losses),              text_color = c_bear,   text_size = size.small)
     table.cell(tbl, 4, row, f_rate_str(wins, losses),          text_color = f_rate_color(wins, losses), text_size = size.small)
 
-var table stats_tbl = table.new(f_table_pos(stats_pos), 5, 4, bgcolor = #131722, border_color = #2a2e39, border_width = 1, frame_color = #2a2e39, frame_width = 1)
+var table stats_tbl = table.new(f_table_pos(stats_pos), 5, 6, bgcolor = #131722, border_color = #2a2e39, border_width = 1, frame_color = #2a2e39, frame_width = 1)
 
 if show_stats and barstate.islast
     color hdr = #787b86
@@ -271,6 +371,19 @@ if show_stats and barstate.islast
     f_row(stats_tbl, 2, '🔴 Short', c_bear,      short_wins,               short_losses)
     f_row(stats_tbl, 3, 'Total',    color.white, long_wins + short_wins,   long_losses + short_losses)
 
+    string trend_txt = trend_state == 1 ? '▲ Bullish' : trend_state == -1 ? '▼ Bearish' : '◆ Ranging'
+    color  trend_col = trend_state == 1 ? c_bull : trend_state == -1 ? c_bear : color.gray
+    string ms_txt    = (ms_trend == 1 ? '▲ Uptrend' : ms_trend == -1 ? '▼ Downtrend' : '◆ Mixed') + '  (' + last_h_type + ' / ' + last_l_type + ')'
+    color  ms_col    = ms_trend == 1 ? c_bull : ms_trend == -1 ? c_bear : color.gray
+    table.cell(stats_tbl, 0, 4, 'Trend',     text_color = hdr, text_size = size.small, text_halign = text.align_left)
+    table.cell(stats_tbl, 1, 4, trend_txt + '  (ADX ' + str.tostring(adx_val, '#') + ')', text_color = trend_col, text_size = size.small, text_halign = text.align_left)
+    table.cell(stats_tbl, 0, 5, 'Structure', text_color = hdr, text_size = size.small, text_halign = text.align_left)
+    table.cell(stats_tbl, 1, 5, ms_txt,      text_color = ms_col,    text_size = size.small, text_halign = text.align_left)
+
+if barstate.isfirst
+    table.merge_cells(stats_tbl, 1, 4, 4, 4)
+    table.merge_cells(stats_tbl, 1, 5, 4, 5)
+
 // ═════════════════════════════════════════════════════════════════
 // PLOTS & ALERTS
 // ═════════════════════════════════════════════════════════════════
@@ -281,5 +394,11 @@ plot(show_trail ? trailing_stop : na, 'Trend Line',
 
 plot(use_ema and show_ema ? ema_val : na, 'Trend EMA', color = color.new(#ffb300, 0), linewidth = 1)
 
+color trend_color = trend_state == 1 ? c_bull : trend_state == -1 ? c_bear : color.gray
+barcolor(color_bars ? trend_color : na)
+bgcolor(show_bg ? color.new(trend_color, 92) : na)
+
 alertcondition(valid_long,  title = 'Long Entry',  message = 'LONG {{ticker}} @ {{close}}')
 alertcondition(valid_short, title = 'Short Entry', message = 'SHORT {{ticker}} @ {{close}}')
+alertcondition(not na(ph) and last_h_type == 'LH', title = 'Lower High (Bearish Reversal Point)', message = 'Lower High on {{ticker}}')
+alertcondition(not na(pl) and last_l_type == 'HL', title = 'Higher Low (Bullish Reversal Point)', message = 'Higher Low on {{ticker}}')
