@@ -9,6 +9,20 @@ atr_period  = input.int(10,    'ATR Period', minval = 1)
 show_trail  = input.bool(true, 'Show Trailing Trend Line')
 show_stats  = input.bool(true, 'Show Win Rate Table', group = 'Stats Table')
 stats_pos   = input.string('Top Right', 'Table Position', options = ['Top Right', 'Top Left', 'Bottom Right', 'Bottom Left'], group = 'Stats Table')
+strict_eval = input.bool(true, 'Conservative Scoring (TP1 + SL on same bar = Loss)', group = 'Stats Table')
+
+// Filters
+use_ema   = input.bool(true,  'EMA Trend Filter',   group = 'Filters')
+ema_len   = input.int(200,    'EMA Length',         minval = 1, group = 'Filters')
+show_ema  = input.bool(true,  'Show EMA',           group = 'Filters')
+use_adx   = input.bool(true,  'ADX Chop Filter',    group = 'Filters')
+adx_len   = input.int(14,     'ADX Length',         minval = 1, group = 'Filters')
+adx_min   = input.float(20,   'Min ADX',            step = 1, group = 'Filters')
+use_htf   = input.bool(false, 'Higher TF Trend Filter', group = 'Filters')
+htf       = input.timeframe('60', 'Higher Timeframe', group = 'Filters')
+htf_len   = input.int(50,     'Higher TF EMA Length', minval = 1, group = 'Filters')
+min_risk  = input.float(0.5,  'Min Risk (x ATR)',   step = 0.1, minval = 0, group = 'Filters')
+sl_buffer = input.float(0.2,  'SL Buffer (x ATR)',  step = 0.1, minval = 0, group = 'Filters')
 
 // Colors
 c_bull = #00e676
@@ -39,6 +53,20 @@ raw_short = ta.crossunder(close, trailing_stop)
 // Structural Pivots
 pivot_high = ta.highest(high, 10)[1]
 pivot_low  = ta.lowest(low, 10)[1]
+
+// ═════════════════════════════════════════════════════════════════
+// SIGNAL FILTERS
+// ═════════════════════════════════════════════════════════════════
+ema_val         = ta.ema(close, ema_len)
+[_, _, adx_val] = ta.dmi(adx_len, adx_len)
+htf_ema         = request.security(syminfo.tickerid, htf, ta.ema(close, htf_len)[1], lookahead = barmerge.lookahead_on)
+
+// Stop levels with ATR buffer beyond the structure
+long_sl_est  = math.min(pivot_low,  trailing_stop) - sl_buffer * xATR
+short_sl_est = math.max(pivot_high, trailing_stop) + sl_buffer * xATR
+
+long_ok  = (not use_ema or close > ema_val) and (not use_adx or adx_val > adx_min) and (not use_htf or close > htf_ema) and (close - long_sl_est)  >= min_risk * xATR
+short_ok = (not use_ema or close < ema_val) and (not use_adx or adx_val > adx_min) and (not use_htf or close < htf_ema) and (short_sl_est - close) >= min_risk * xATR
 
 // ═════════════════════════════════════════════════════════════════
 // TRADE TRACKER WITH IMMUTABLE WIN-LOCK
@@ -87,16 +115,22 @@ f_render_text(is_long, entry, tp1, tp2, tp3, sl, h1, h2, h3, hsl, is_be) =>
 // Check Active Trade Progress
 if t_dir == 1
     // Long Evaluation
-    if not hit_tp1 and high >= t_tp1
+    // Ambiguous bar: TP1 and SL both touched, order unknown -> score as loss
+    if strict_eval and not hit_tp1 and high >= t_tp1 and low <= t_sl
+        hit_sl      := true
+        t_dir       := 0
+        long_losses += 1
+
+    if not hit_tp1 and not hit_sl and high >= t_tp1
         hit_tp1   := true
         be_locked := true  // Auto-Breakeven engaged!
         t_sl      := t_entry
         long_wins += 1     // Win is locked the moment TP1 is touched
 
-    if not hit_tp2 and high >= t_tp2
+    if not hit_tp2 and not hit_sl and high >= t_tp2
         hit_tp2 := true
 
-    if not hit_tp3 and high >= t_tp3
+    if not hit_tp3 and not hit_sl and high >= t_tp3
         hit_tp3 := true
 
     // Only allow SL trigger if TP1 was NEVER touched and not on entry bar
@@ -117,16 +151,22 @@ if t_dir == 1
 
 if t_dir == -1
     // Short Evaluation
-    if not hit_tp1 and low <= t_tp1
+    // Ambiguous bar: TP1 and SL both touched, order unknown -> score as loss
+    if strict_eval and not hit_tp1 and low <= t_tp1 and high >= t_sl
+        hit_sl       := true
+        t_dir        := 0
+        short_losses += 1
+
+    if not hit_tp1 and not hit_sl and low <= t_tp1
         hit_tp1    := true
         be_locked  := true  // Auto-Breakeven engaged!
         t_sl       := t_entry
         short_wins += 1     // Win is locked the moment TP1 is touched
 
-    if not hit_tp2 and low <= t_tp2
+    if not hit_tp2 and not hit_sl and low <= t_tp2
         hit_tp2 := true
 
-    if not hit_tp3 and low <= t_tp3
+    if not hit_tp3 and not hit_sl and low <= t_tp3
         hit_tp3 := true
 
     // Only allow SL trigger if TP1 was NEVER touched and not on entry bar
@@ -150,14 +190,14 @@ if t_dir == -1
 // ═════════════════════════════════════════════════════════════════
 can_enter = (t_dir == 0)
 
-valid_long  = raw_long  and can_enter
-valid_short = raw_short and can_enter
+valid_long  = raw_long  and can_enter and long_ok
+valid_short = raw_short and can_enter and short_ok
 
 if valid_long
     t_dir       := 1
     t_start_bar := bar_index
     t_entry     := close
-    t_sl        := math.min(pivot_low, trailing_stop)
+    t_sl        := long_sl_est
     float risk  = t_entry - t_sl
     t_tp1       := t_entry + (risk * 0.50)  // Rapid scalp win target
     t_tp2       := math.max(t_entry + risk, pivot_high)
@@ -176,7 +216,7 @@ if valid_short
     t_dir       := -1
     t_start_bar := bar_index
     t_entry     := close
-    t_sl        := math.max(pivot_high, trailing_stop)
+    t_sl        := short_sl_est
     float risk  = t_sl - t_entry
     t_tp1       := t_entry - (risk * 0.50)  // Rapid scalp win target
     t_tp2       := math.min(t_entry - risk, pivot_low)
@@ -238,6 +278,8 @@ plot(show_trail ? trailing_stop : na, 'Trend Line',
      color = close > trailing_stop ? c_bull : c_bear, 
      linewidth = 2, 
      style = plot.style_linebr)
+
+plot(use_ema and show_ema ? ema_val : na, 'Trend EMA', color = color.new(#ffb300, 0), linewidth = 1)
 
 alertcondition(valid_long,  title = 'Long Entry',  message = 'LONG {{ticker}} @ {{close}}')
 alertcondition(valid_short, title = 'Short Entry', message = 'SHORT {{ticker}} @ {{close}}')
