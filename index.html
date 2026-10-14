@@ -260,6 +260,7 @@
       <input type="text" id="symInput" placeholder="e.g. DOGE" maxlength="12" />
       <button id="addBtn">Add contract</button>
       <button id="viewBtn" class="ghost">Table view</button>
+      <button id="logBtn" class="ghost" title="Download every signal flip seen on closed candles, with what price did afterwards">Export signal log</button>
       <button id="themeBtn" class="ghost">Theme</button>
     </div>
   </header>
@@ -297,10 +298,12 @@
   </div>
 
   <footer>
-    Data: Binance USD-M Futures public API (fapi.binance.com) &middot; mark/index/funding refresh every 5s &middot; open interest every 15s &middot; charts every 60s
+    Data: Binance USD-M Futures public API (fapi.binance.com) &middot; mark/index/funding refresh every 5s &middot; open interest every 15s &middot; charts every 60s<br>
+    Signal log: while this page is open, every Trend / Adaptive Trend / OI-Price flip on a closed candle of the selected timeframe is saved in this browser, and its forward returns are filled in 24 candles later. Export it for analysis.
   </footer>
 </div>
 
+<script src="indicators.js"></script>
 <script>
 (function () {
   "use strict";
@@ -311,167 +314,26 @@
   var KLINE_FETCH_LIMIT = 200; // pulled once per refresh — 24 feed the price chart, the rest feed the trend indicator's lookback
   var TREND_CHART_POINTS = 48; // how many recent trend readings to plot in the mini chart
 
-  // Port of the "Trend" Pine Script indicator (multi-timescale Spearman rank-correlation consensus).
-  // Each preset mirrors the script's own preset overrides exactly.
-  var TREND_PRESETS = {
-    "default": {
-      label: "Default",
-      windows: [{ enabled: true, len: 8 }, { enabled: true, len: 13 }, { enabled: true, len: 21 }, { enabled: true, len: 34 }],
-      threshold: 0.35, minConviction: 60
-    },
-    "fast": {
-      label: "Fast Response",
-      windows: [{ enabled: true, len: 5 }, { enabled: true, len: 8 }, { enabled: true, len: 13 }, { enabled: true, len: 21 }],
-      threshold: 0.25, minConviction: 50
-    },
-    "smooth": {
-      label: "Smooth Trend",
-      windows: [{ enabled: true, len: 21 }, { enabled: true, len: 34 }, { enabled: true, len: 55 }, { enabled: true, len: 89 }],
-      threshold: 0.45, minConviction: 75
-    }
-  };
-
-  function spearmanRho(s, len) {
-    var sumd2 = 0;
-    for (var i = 0; i < len; i++) {
-      var pi = s[i], less = 0, eq = 0;
-      for (var j = 0; j < len; j++) {
-        var pj = s[j];
-        if (pj < pi) less++; else if (pj === pi) eq++;
-      }
-      var priceRank = less + (eq + 1) / 2;
-      var timeRank = len - i;
-      var d = priceRank - timeRank;
-      sumd2 += d * d;
-    }
-    var denom = len * len * len - len;
-    var rho = denom > 0 ? 1 - 6 * sumd2 / denom : 0;
-    return Math.max(-1, Math.min(1, rho));
-  }
-  function windowRho(closes, idx, len) {
-    if (idx < len) return null; // mirrors the script's own `bar_index >= len` gate, one bar more conservative than strictly needed
-    var slice = new Array(len);
-    for (var i = 0; i < len; i++) slice[i] = closes[idx - i];
-    return spearmanRho(slice, len);
-  }
-  function computeTrendSeries(closes, cfg) {
-    var n = closes.length;
-    var consensusArr = new Array(n), convictionArr = new Array(n), trendDirArr = new Array(n);
-    var trendDir = 0;
-    for (var idx = 0; idx < n; idx++) {
-      var rhos = [];
-      for (var w = 0; w < cfg.windows.length; w++) {
-        var win = cfg.windows[w];
-        if (!win.enabled) continue;
-        var r = windowRho(closes, idx, win.len);
-        if (r !== null) rhos.push(r);
-      }
-      var consensus = 0, conviction = 0, rawState = 0;
-      if (rhos.length > 0) {
-        var sum = 0; for (var k = 0; k < rhos.length; k++) sum += rhos[k];
-        consensus = sum / rhos.length;
-        var sgn = consensus >= 0 ? 1 : -1, agree = 0;
-        for (k = 0; k < rhos.length; k++) { if ((rhos[k] >= 0 ? 1 : -1) === sgn) agree++; }
-        conviction = 100 * agree / rhos.length;
-        if (consensus > cfg.threshold && conviction >= cfg.minConviction) rawState = 1;
-        else if (consensus < -cfg.threshold && conviction >= cfg.minConviction) rawState = -1;
-      }
-      trendDir = rawState !== 0 ? rawState : 0; // show_neutral = true (the script's default)
-      consensusArr[idx] = consensus;
-      convictionArr[idx] = conviction;
-      trendDirArr[idx] = trendDir;
-    }
-    return { consensusArr: consensusArr, convictionArr: convictionArr, trendDirArr: trendDirArr };
-  }
-
-  // Port of the "Adaptive Trend [Test 3]" Pine Script. All three shipped presets use
-  // ma_type = "EMA", so only EMA is implemented here (matches how the app exposes presets
-  // rather than the raw length/mult/fast/slow/ma_type controls).
-  var ADAPTIVE_PRESETS = {
-    "default": { label: "Default", length: 20, mult: 1.5, fast: 3, slow: 8 },
-    "fast": { label: "Fast Response", length: 12, mult: 1.0, fast: 2, slow: 5 },
-    "smooth": { label: "Smooth Trend", length: 30, mult: 2.0, fast: 5, slow: 13 }
-  };
-
-  function stdevPop(arr) {
-    var n = arr.length;
-    if (n === 0) return 0;
-    var mean = 0;
-    for (var i = 0; i < n; i++) mean += arr[i];
-    mean /= n;
-    var sumSq = 0;
-    for (i = 0; i < n; i++) { var d = arr[i] - mean; sumSq += d * d; }
-    return Math.sqrt(sumSq / n);
-  }
-
-  // Kaufman-style adaptive filter: alpha rises when net directional movement ("velocity") over the
-  // lookback is large relative to bar-to-bar volatility, so the line hugs price in a clean trend and
-  // lags heavily during chop. Mirrors the script's `kinetic_line` exactly (recursive, seeded at source).
-  function computeAdaptiveKinetic(values, length, mult) {
-    var n = values.length;
-    var kinetic = new Array(n);
-    kinetic[0] = values[0];
-    for (var i = 1; i < n; i++) {
-      if (i < length) {
-        // Not enough history for a full lookback window yet (Pine would show na too) — holding at
-        // source is a harmless stand-in for these warm-up bars, which sit far before the bars we read.
-        kinetic[i] = values[i];
-        continue;
-      }
-      var velocity = values[i] - values[i - length];
-      var diffs = new Array(length);
-      for (var k = 0; k < length; k++) {
-        var idx = i - length + 1 + k;
-        diffs[k] = values[idx] - values[idx - 1];
-      }
-      var volatility = stdevPop(diffs) * mult;
-      var denom = Math.abs(velocity) + volatility;
-      var alpha = denom === 0 ? 0 : Math.abs(velocity) / denom;
-      kinetic[i] = kinetic[i - 1] + alpha * (values[i] - kinetic[i - 1]);
-    }
-    return kinetic;
-  }
-
-  function emaArr(values, len) {
-    var n = values.length, out = new Array(n);
-    var alpha = 2 / (len + 1);
-    out[0] = values[0];
-    for (var i = 1; i < n; i++) out[i] = out[i - 1] + alpha * (values[i] - out[i - 1]);
-    return out;
-  }
-
-  // ribbon_fast/ribbon_slow are EMAs of the kinetic line; trend_up = fast>slow, acceleration =
-  // fast rising. The 4 combined states mirror the script's ribbonColor branches exactly:
-  //   trend_up && accel      -> bull_accel (strongest bullish, momentum building)
-  //   trend_up && !accel     -> bull_decel (still up, but momentum fading)
-  //   !trend_up && !accel    -> bear_accel (strongest bearish, momentum building)
-  //   !trend_up && accel     -> bear_decel (still down, but momentum fading)
-  function computeAdaptiveTrend(closes, cfg) {
-    var kinetic = computeAdaptiveKinetic(closes, cfg.length, cfg.mult);
-    var ribbonFast = emaArr(kinetic, cfg.fast);
-    var ribbonSlow = emaArr(kinetic, cfg.slow);
-    var n = closes.length;
-    var stateArr = new Array(n);
-    for (var i = 0; i < n; i++) {
-      var trendUp = ribbonFast[i] > ribbonSlow[i];
-      var accel = i > 0 ? ribbonFast[i] > ribbonFast[i - 1] : true;
-      stateArr[i] = trendUp ? (accel ? "bull_accel" : "bull_decel") : (accel ? "bear_decel" : "bear_accel");
-    }
-    return { kinetic: kinetic, ribbonFast: ribbonFast, ribbonSlow: ribbonSlow, stateArr: stateArr };
-  }
+  // Indicator math lives in indicators.js so the backtest (backtest/backtest.mjs) replays exactly
+  // the same logic the dashboard displays.
+  var TREND_PRESETS = Indicators.TREND_PRESETS;
+  var ADAPTIVE_PRESETS = Indicators.ADAPTIVE_PRESETS;
+  var computeTrendSeries = Indicators.computeTrendSeries;
+  var computeAdaptiveTrend = Indicators.computeAdaptiveTrend;
+  var classifyOiPriceSignal = Indicators.classifyOiPriceSignal;
 
   var ADAPTIVE_LABELS = { bull_accel: "BULL ACCEL", bull_decel: "BULL DECEL", bear_accel: "BEAR ACCEL", bear_decel: "BEAR DECEL" };
   var ADAPTIVE_CLASSES = { bull_accel: "good", bull_decel: "warning", bear_accel: "critical", bear_decel: "warning" };
   var ADAPTIVE_ARROWS = { bull_accel: "▲", bull_decel: "▲", bear_accel: "▼", bear_decel: "▼" };
 
   var TIMEFRAMES = [
-    { key: "1m",  interval: "1m",  label: "1m",  windowLabel: "last 24m" },
-    { key: "5m",  interval: "5m",  label: "5m",  windowLabel: "last 2h" },
-    { key: "15m", interval: "15m", label: "15m", windowLabel: "last 6h" },
-    { key: "30m", interval: "30m", label: "30m", windowLabel: "last 12h" },
-    { key: "1h",  interval: "1h",  label: "1H",  windowLabel: "last 24h" },
-    { key: "4h",  interval: "4h",  label: "4H",  windowLabel: "last 4d" },
-    { key: "1d",  interval: "1d",  label: "1D",  windowLabel: "last 24d" }
+    { key: "1m",  interval: "1m",  label: "1m",  windowLabel: "last 24m", ms: 60000 },
+    { key: "5m",  interval: "5m",  label: "5m",  windowLabel: "last 2h", ms: 300000 },
+    { key: "15m", interval: "15m", label: "15m", windowLabel: "last 6h", ms: 900000 },
+    { key: "30m", interval: "30m", label: "30m", windowLabel: "last 12h", ms: 1800000 },
+    { key: "1h",  interval: "1h",  label: "1H",  windowLabel: "last 24h", ms: 3600000 },
+    { key: "4h",  interval: "4h",  label: "4H",  windowLabel: "last 4d", ms: 14400000 },
+    { key: "1d",  interval: "1d",  label: "1D",  windowLabel: "last 24d", ms: 86400000 }
   ];
   function findTimeframe(key) {
     for (var i = 0; i < TIMEFRAMES.length; i++) { if (TIMEFRAMES[i].key === key) return TIMEFRAMES[i]; }
@@ -655,24 +517,6 @@
   function candleChartHtml(candles) {
     var values = candles ? candles.map(function (c) { return c.c; }) : null;
     return seriesChartHtml(values, function (v) { return "$" + fmtPrice(v); });
-  }
-
-  // Classic OI-vs-price read: does open interest confirm the price move (new positions opening)
-  // or contradict it (positions closing, i.e. covering/liquidation)?
-  //   OI up   + price up   -> new longs opening      (confirmed bullish move)
-  //   OI up   + price down -> new shorts opening      (confirmed bearish move)
-  //   OI down + price up   -> short covering          (rally driven by exits, more fragile)
-  //   OI down + price down -> long liquidation        (decline driven by exits, more fragile)
-  function classifyOiPriceSignal(candles, oiHist) {
-    if (!candles || candles.length < 2 || !oiHist || oiHist.length < 2) {
-      return { label: "Not enough data", cls: "neutral", arrow: "●" };
-    }
-    var priceUp = candles[candles.length - 1].c >= candles[0].c;
-    var oiUp = oiHist[oiHist.length - 1].oi >= oiHist[0].oi;
-    if (oiUp && priceUp) return { label: "New Longs", cls: "good", arrow: "▲" };
-    if (oiUp && !priceUp) return { label: "New Shorts", cls: "critical", arrow: "▼" };
-    if (!oiUp && priceUp) return { label: "Short Covering", cls: "warning", arrow: "▲" };
-    return { label: "Long Liquidation", cls: "warning", arrow: "▼" };
   }
 
   function dirColor(dir) { return dir === 1 ? "var(--good)" : dir === -1 ? "var(--critical)" : "var(--ink-muted)"; }
@@ -939,10 +783,154 @@
         state.candlesFull[sym] = candles;
         computeTrendForSymbol(sym);
         computeAdaptiveForSymbol(sym);
+        logSignals(sym);
         render();
       })
       .catch(function () { /* keep previous candles/trend on failure */ });
   }
+  // ---------- Signal log ----------
+  // Records each signal flip on the selected timeframe's *closed* candles (the forming candle can
+  // flip back and forth, so it's ignored), then fills in what price did 1/4/12/24 candles later.
+  // Columns match backtest/backtest.mjs's events.csv so both can be analysed the same way.
+  var LOG_KEY = "signalLog.v1";
+  var LOG_MAX_EVENTS = 5000;
+  var LOG_HORIZONS = [1, 4, 12, 24];
+  var LOG_SIGNALS = ["trend", "adaptive", "oi_price"];
+  var LOG_COLUMNS = ["time", "symbol", "tf", "close", "signal", "value", "prev_value", "direction",
+    "trend_consensus", "trend_conviction", "adaptive_spread_pct", "kinetic_dist_pct", "price_change_pct", "oi_change_pct",
+    "funding_rate_pct", "rvol", "trend_preset", "adaptive_preset",
+    "ret_1", "ret_4", "ret_12", "ret_24", "favourable_24", "adverse_24", "bars_held", "ret_held"];
+
+  function loadSignalLog() {
+    try {
+      var raw = localStorage.getItem(LOG_KEY);
+      if (raw) {
+        var parsed = JSON.parse(raw);
+        if (parsed && Array.isArray(parsed.events) && parsed.last) return parsed;
+      }
+    } catch (e) { /* storage unavailable — log lives in memory for this visit only */ }
+    return { events: [], last: {} };
+  }
+  var signalLog = loadSignalLog();
+  function saveSignalLog() {
+    if (signalLog.events.length > LOG_MAX_EVENTS) signalLog.events = signalLog.events.slice(-LOG_MAX_EVENTS);
+    try { localStorage.setItem(LOG_KEY, JSON.stringify(signalLog)); } catch (e) { /* ignore */ }
+    updateLogButton();
+  }
+  function updateLogButton() {
+    var btn = document.getElementById("logBtn");
+    if (btn) btn.textContent = "Export signal log (" + signalLog.events.length + ")";
+  }
+  function pct(a, b) { return b ? (a / b - 1) * 100 : null; }
+
+  function logSignals(sym) {
+    var candles = state.candlesFull[sym];
+    var trend = state.trend[sym], adaptive = state.adaptive[sym];
+    if (!candles || candles.length < CANDLE_COUNT + 2 || !trend || !adaptive) return;
+    var tf = state.timeframe;
+    var i = candles.length - 2; // last closed candle
+    var bar = candles[i];
+    var key = [sym, tf.key, state.trendPreset, state.adaptivePreset].join("|"); // a preset change starts a fresh reading, not a flip
+    var prev = signalLog.last[key];
+    if (prev && prev.closeTime >= bar.closeTime) return; // already handled this candle
+
+    var closed = candles.slice(0, i + 1);
+    var oiHist = state.oiHistory[sym];
+    var oiLabel = classifyOiPriceSignal(closed.slice(-CANDLE_COUNT), oiHist).label;
+    var values = {
+      trend: trend.trendDirArr[i] === 1 ? "BULLISH" : trend.trendDirArr[i] === -1 ? "BEARISH" : "NEUTRAL",
+      adaptive: adaptive.stateArr[i],
+      oi_price: Indicators.SIGNAL_DIRECTION.oi_price.hasOwnProperty(oiLabel) ? oiLabel : null
+    };
+    // Only compare against the immediately preceding candle; after a gap (tab closed, timeframe
+    // switched) we can't tell when a flip happened, so just take a fresh reading.
+    var consecutive = prev && bar.closeTime - prev.closeTime === tf.ms;
+    if (consecutive) {
+      var p = state.premium[sym];
+      var rvol = relativeVolume(candles, CANDLE_COUNT);
+      LOG_SIGNALS.forEach(function (sig) {
+        var v = values[sig], was = prev.values[sig];
+        if (!v || !was || v === was) return;
+        closePreviousEvent(sym, tf.key, sig, bar);
+        signalLog.events.push({
+          time: new Date(bar.closeTime + 1).toISOString(), closeTime: bar.closeTime,
+          symbol: sym, tf: tf.key, close: bar.c, signal: sig, value: v, prev_value: was,
+          direction: Indicators.SIGNAL_DIRECTION[sig][v],
+          trend_consensus: trend.consensusArr[i], trend_conviction: trend.convictionArr[i],
+          adaptive_spread_pct: pct(adaptive.ribbonFast[i], adaptive.ribbonSlow[i]),
+          kinetic_dist_pct: pct(bar.c, adaptive.kinetic[i]),
+          price_change_pct: pct(bar.c, closed[closed.length - CANDLE_COUNT].c),
+          oi_change_pct: oiHist && oiHist.length >= 2 ? pct(oiHist[oiHist.length - 1].oi, oiHist[0].oi) : null,
+          funding_rate_pct: p ? parseFloat(p.lastFundingRate) * 100 : null,
+          rvol: rvol ? rvol.ratio : null,
+          trend_preset: state.trendPreset, adaptive_preset: state.adaptivePreset
+        });
+      });
+    }
+    signalLog.last[key] = { closeTime: bar.closeTime, values: values };
+    saveSignalLog();
+  }
+
+  // A new flip ends the previous one for the same symbol/timeframe/signal: record how long it
+  // lasted and what it returned while it was the active reading.
+  function closePreviousEvent(sym, tfKey, sig, bar) {
+    for (var k = signalLog.events.length - 1; k >= 0; k--) {
+      var e = signalLog.events[k];
+      if (e.symbol !== sym || e.tf !== tfKey || e.signal !== sig) continue;
+      if (e.bars_held == null) {
+        e.bars_held = Math.round((bar.closeTime - e.closeTime) / findTimeframe(tfKey).ms);
+        e.ret_held = pct(bar.c, e.close);
+      }
+      return;
+    }
+  }
+
+  // Once 24 candles have closed after a flip, fetch those candles and fill in its forward returns.
+  var outcomeFetchesInFlight = {};
+  function fillSignalOutcomes() {
+    var now = Date.now(), started = 0;
+    signalLog.events.forEach(function (e) {
+      if (e.ret_24 != null || started >= 6) return;
+      var tfMs = findTimeframe(e.tf).ms;
+      var id = e.symbol + "|" + e.tf + "|" + e.closeTime;
+      if (now < e.closeTime + 24 * tfMs || outcomeFetchesInFlight[id]) return;
+      outcomeFetchesInFlight[id] = true;
+      started++;
+      fetch("https://fapi.binance.com/fapi/v1/klines?symbol=" + e.symbol + "&interval=" + e.tf + "&startTime=" + (e.closeTime + 1) + "&limit=24")
+        .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+        .then(function (rows) {
+          if (rows.length < 24) return;
+          var hi = -Infinity, lo = Infinity;
+          rows.forEach(function (row) { hi = Math.max(hi, parseFloat(row[2])); lo = Math.min(lo, parseFloat(row[3])); });
+          LOG_HORIZONS.forEach(function (h) { e["ret_" + h] = pct(parseFloat(rows[h - 1][4]), e.close); });
+          var up = pct(hi, e.close), down = pct(lo, e.close);
+          e.favourable_24 = e.direction === 1 ? up : e.direction === -1 ? -down : null;
+          e.adverse_24 = e.direction === 1 ? down : e.direction === -1 ? -up : null;
+          saveSignalLog();
+        })
+        .catch(function () { /* retry on the next cycle */ })
+        .then(function () { delete outcomeFetchesInFlight[id]; });
+    });
+  }
+
+  function exportSignalLog() {
+    function cell(v) {
+      if (v === null || v === undefined || (typeof v === "number" && isNaN(v))) return "";
+      if (typeof v === "number") return Number.isInteger(v) ? String(v) : v.toFixed(6);
+      v = String(v);
+      return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v;
+    }
+    var csv = LOG_COLUMNS.join(",") + "\n" + signalLog.events.map(function (e) {
+      return LOG_COLUMNS.map(function (c) { return cell(e[c]); }).join(",");
+    }).join("\n") + "\n";
+    var a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+    a.download = "signal-log-" + new Date().toISOString().slice(0, 10) + ".csv";
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 0);
+  }
+
   function fetchAllKlines() {
     state.symbols.forEach(fetchKlines);
   }
@@ -1134,6 +1122,8 @@
     this.textContent = state.view === "cards" ? "Table view" : "Card view";
   });
 
+  document.getElementById("logBtn").addEventListener("click", exportSignalLog);
+
   document.getElementById("themeBtn").addEventListener("click", function () {
     var root = document.documentElement;
     var current = root.getAttribute("data-theme");
@@ -1156,6 +1146,9 @@
   setInterval(fetchAllKlines, 60000);
   setInterval(fetchAllTrendMulti, 60000);
   setInterval(render, 1000); // keep funding countdowns ticking
+  updateLogButton();
+  fillSignalOutcomes();
+  setInterval(fillSignalOutcomes, 60000);
 })();
 </script>
 </body>
