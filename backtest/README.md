@@ -1,6 +1,6 @@
 # Signal backtest
 
-Replays the dashboard's three signals (Trend, Adaptive Trend, OI / Price) over Binance USD-M
+Replays the dashboard's signals (Trend, Adaptive Trend, OI / Price, Order Flow) over Binance USD-M
 futures history and measures what price did after each signal flipped. It runs the same code as the
 dashboard (`../indicators.js`), so the results describe exactly what you see on screen, measured on
 closed candles.
@@ -21,7 +21,7 @@ years, unlike the live API's ~30 days. Downloads are cached in `backtest/.cache/
 | file | contents |
 |---|---|
 | `summary.csv` | per signal value: number of flips, average return after 1/4/12/24 candles, win rate, edge vs. the baseline, how long the signal lasted |
-| `events.csv` | one row per flip: the indicator inputs (consensus, conviction, ribbon spread, OI change, funding, top-trader and taker long/short ratios, relative volume) and what happened next |
+| `events.csv` | one row per flip: the indicator inputs (consensus, conviction, ribbon spread, OI change, order-flow pressure, funding, top-trader and taker long/short ratios, relative volume) and what happened next |
 | `bars.csv` | the same readings for every candle, for tuning thresholds or testing combinations |
 
 - **win**: the share of flips where price then moved the way the signal pointed.

@@ -174,13 +174,57 @@
     return { label: "Long Liquidation", cls: "warning", arrow: "▼" };
   }
 
+  // Order-flow pressure: who is crossing the spread. Binance candles carry taker-buy volume, so
+  // taker-sell = total - taker-buy and flow = (buy - sell) / total over `window` candles (-1..+1).
+  // Flow is then z-scored against its own last `lookback` readings, because the resting buy/sell
+  // balance differs per coin; |z| >= threshold means unusually one-sided aggression. Comparing that
+  // with the price move over the same window separates pressure that is already moving price from
+  // pressure building against the move (buying a dip / selling a rally).
+  var ORDER_FLOW_CONFIG = { window: 20, lookback: 100, threshold: 1.0 };
+
+  function computeOrderFlow(closes, quoteVols, takerBuyVols, cfg) {
+    var n = closes.length, W = cfg.window, L = cfg.lookback;
+    var flowArr = new Array(n), zArr = new Array(n), stateArr = new Array(n);
+    var sumVol = 0, sumDelta = 0;
+    for (var i = 0; i < n; i++) {
+      sumVol += quoteVols[i];
+      sumDelta += 2 * takerBuyVols[i] - quoteVols[i];
+      if (i >= W) {
+        sumVol -= quoteVols[i - W];
+        sumDelta -= 2 * takerBuyVols[i - W] - quoteVols[i - W];
+      }
+      flowArr[i] = i >= W - 1 && sumVol > 0 ? sumDelta / sumVol : null;
+    }
+    for (i = 0; i < n; i++) {
+      zArr[i] = null; stateArr[i] = null;
+      if (i < W - 1 + L - 1 || flowArr[i] === null) continue;
+      var hist = [];
+      for (var k = i - L + 1; k <= i; k++) if (flowArr[k] !== null) hist.push(flowArr[k]);
+      var mean = 0;
+      for (k = 0; k < hist.length; k++) mean += hist[k];
+      mean /= hist.length;
+      var sd = stdevPop(hist);
+      var z = sd > 0 ? (flowArr[i] - mean) / sd : 0;
+      var priceUp = closes[i] >= closes[i - W + 1];
+      zArr[i] = z;
+      if (z >= cfg.threshold) stateArr[i] = priceUp ? "buyers" : "buying_dip";
+      else if (z <= -cfg.threshold) stateArr[i] = priceUp ? "selling_rally" : "sellers";
+      else stateArr[i] = "balanced";
+    }
+    return { flowArr: flowArr, zArr: zArr, stateArr: stateArr };
+  }
+
   // Which way each signal value points (+1 up, -1 down, 0 none) — used to score signals by
   // whether price then moved the way they said. Short Covering / Long Liquidation follow their
   // price arrow, even though the dashboard flags them as the more fragile variants.
   var SIGNAL_DIRECTION = {
     trend: { BULLISH: 1, NEUTRAL: 0, BEARISH: -1 },
     adaptive: { bull_accel: 1, bull_decel: 1, bear_decel: -1, bear_accel: -1 },
-    oi_price: { "New Longs": 1, "Short Covering": 1, "New Shorts": -1, "Long Liquidation": -1 }
+    oi_price: { "New Longs": 1, "Short Covering": 1, "New Shorts": -1, "Long Liquidation": -1 },
+    // Flow leads: heavy buying into a falling price was followed by rises in the backtest (6 coins,
+    // 1h, 180 days), not by the further fall an "absorption" reading would predict — so all
+    // states point the way of the aggressive flow.
+    order_flow: { buyers: 1, buying_dip: 1, balanced: 0, selling_rally: -1, sellers: -1 }
   };
 
   return {
@@ -189,6 +233,8 @@
     ADAPTIVE_PRESETS: ADAPTIVE_PRESETS,
     computeTrendSeries: computeTrendSeries,
     computeAdaptiveTrend: computeAdaptiveTrend,
-    classifyOiPriceSignal: classifyOiPriceSignal
+    classifyOiPriceSignal: classifyOiPriceSignal,
+    ORDER_FLOW_CONFIG: ORDER_FLOW_CONFIG,
+    computeOrderFlow: computeOrderFlow
   };
 });

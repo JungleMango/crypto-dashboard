@@ -280,13 +280,30 @@
     </div>
   </details>
 
+  <details class="legend">
+    <summary>How to read the Order Flow signal</summary>
+    <div class="legend-body">
+      <table>
+        <thead><tr><th>Taker flow</th><th>Price</th><th>Signal</th></tr></thead>
+        <tbody>
+          <tr><td>Unusually heavy buying</td><td>Rising</td><td class="meaning"><span class="trend-badge good">▲ Buyers</span> &middot; aggressive buyers are lifting price</td></tr>
+          <tr><td>Unusually heavy selling</td><td>Falling</td><td class="meaning"><span class="trend-badge critical">▼ Sellers</span> &middot; aggressive sellers are pushing price down</td></tr>
+          <tr><td>Unusually heavy buying</td><td>Falling</td><td class="meaning"><span class="trend-badge warning">▲ Buying the Dip</span> &middot; buyers stepping in against the drop (leans bullish)</td></tr>
+          <tr><td>Unusually heavy selling</td><td>Rising</td><td class="meaning"><span class="trend-badge warning">▼ Selling the Rally</span> &middot; sellers leaning on the rise (leans bearish)</td></tr>
+          <tr><td>Normal</td><td>Either</td><td class="meaning"><span class="trend-badge neutral">● Balanced</span> &middot; no unusual pressure either way</td></tr>
+        </tbody>
+      </table>
+      <p style="margin:8px 0 0;">"Unusual" = taker buy-minus-sell volume over the last 20 candles, at least 1 standard deviation away from its own last 100 readings. In backtests price tended to follow the flow, though weakly and not on every coin. Top-trader L/S is Binance's top-20%-of-accounts long/short position ratio, shown for context.</p>
+    </div>
+  </details>
+
   <div class="grid" id="grid"></div>
   <div class="table-scroll hidden" id="tableView">
     <table class="view">
       <thead>
         <tr>
           <th rowspan="2">Contract</th><th rowspan="2">24h %</th><th rowspan="2" id="tfRvolHeader">Rel. Volume</th>
-          <th rowspan="2">OI/Price Signal</th><th rowspan="2">24h Vol (USDT)</th><th rowspan="2" id="tfVolHeader">TF Vol Share</th>
+          <th rowspan="2">OI/Price Signal</th><th rowspan="2">Order Flow</th><th rowspan="2">24h Vol (USDT)</th><th rowspan="2" id="tfVolHeader">TF Vol Share</th>
           <th colspan="7" class="grp-trend grp-divider" style="text-align:center;"><span class="grp-label"><span class="grp-dot trend"></span>Trend by Timeframe</span></th>
           <th colspan="7" class="grp-adaptive grp-divider" style="text-align:center;"><span class="grp-label"><span class="grp-dot adaptive"></span>Adaptive Trend by Timeframe</span></th>
           <th rowspan="2" class="grp-divider">Funding</th><th rowspan="2">Next Funding</th>
@@ -299,7 +316,7 @@
 
   <footer>
     Data: Binance USD-M Futures public API (fapi.binance.com) &middot; mark/index/funding refresh every 5s &middot; open interest every 15s &middot; charts every 60s<br>
-    Signal log: while this page is open, every Trend / Adaptive Trend / OI-Price flip on a closed candle of the selected timeframe is saved in this browser, and its forward returns are filled in 24 candles later. Export it for analysis.
+    Signal log: while this page is open, every Trend / Adaptive Trend / OI-Price / Order Flow flip on a closed candle of the selected timeframe is saved in this browser, and its forward returns are filled in 24 candles later. Export it for analysis.
   </footer>
 </div>
 
@@ -321,10 +338,16 @@
   var computeTrendSeries = Indicators.computeTrendSeries;
   var computeAdaptiveTrend = Indicators.computeAdaptiveTrend;
   var classifyOiPriceSignal = Indicators.classifyOiPriceSignal;
+  var computeOrderFlow = Indicators.computeOrderFlow;
+  var ORDER_FLOW_CONFIG = Indicators.ORDER_FLOW_CONFIG;
 
   var ADAPTIVE_LABELS = { bull_accel: "BULL ACCEL", bull_decel: "BULL DECEL", bear_accel: "BEAR ACCEL", bear_decel: "BEAR DECEL" };
   var ADAPTIVE_CLASSES = { bull_accel: "good", bull_decel: "warning", bear_accel: "critical", bear_decel: "warning" };
   var ADAPTIVE_ARROWS = { bull_accel: "▲", bull_decel: "▲", bear_accel: "▼", bear_decel: "▼" };
+
+  var FLOW_LABELS = { buyers: "BUYERS", sellers: "SELLERS", buying_dip: "BUYING THE DIP", selling_rally: "SELLING THE RALLY", balanced: "BALANCED" };
+  var FLOW_CLASSES = { buyers: "good", sellers: "critical", buying_dip: "warning", selling_rally: "warning", balanced: "neutral" };
+  var FLOW_ARROWS = { buyers: "▲", sellers: "▼", buying_dip: "▲", selling_rally: "▼", balanced: "●" };
 
   var TIMEFRAMES = [
     { key: "1m",  interval: "1m",  label: "1m",  windowLabel: "last 24m", ms: 60000 },
@@ -373,6 +396,8 @@
     closesByTf: {},  // symbol -> { tfKey: closes[] } — raw closes cached per timeframe, independent of the selected chart timeframe
     trendMulti: {},  // symbol -> { tfKey: {dir, consensus, conviction} } — latest Trend reading per timeframe, for the table's multi-timeframe view
     adaptiveMulti: {}, // symbol -> { tfKey: {state, fast, slow} } — latest Adaptive Trend reading per timeframe, for the table's multi-timeframe view
+    flow: {},      // symbol -> {flowArr, zArr, stateArr} cached from computeOrderFlow, for the currently selected timeframe
+    topTrader: {}, // symbol -> array of {t, ratio}: Binance top-trader long/short position ratio, same period as oiHistory
     oiSignalSince: {}, // symbol -> {label, since} — tracks when the OI/Price classification last changed
     timeframe: findTimeframe("1h"), // default 1H, matches the 24h stats shown alongside it
     trendPreset: "default",
@@ -577,7 +602,7 @@
         cardsHtml += '<div class="card"><button class="remove" data-sym="' + sym + '">×</button>' +
           '<div class="sym-row"><span class="sym">' + baseAsset(sym) + '</span><span class="quote">/USDT</span><span class="perp-tag">Perp</span></div>' +
           '<div class="price" style="color:var(--ink-muted); font-size:15px;">loading…</div></div>';
-        rowsHtml += '<tr><td>' + baseAsset(sym) + '</td><td colspan="21" style="color:var(--ink-muted)">loading…</td></tr>';
+        rowsHtml += '<tr><td>' + baseAsset(sym) + '</td><td colspan="22" style="color:var(--ink-muted)">loading…</td></tr>';
         return;
       }
 
@@ -631,6 +656,30 @@
         );
       } else {
         adaptiveChartHtml = seriesChartHtml(null, function (v) { return "$" + fmtPrice(v); });
+      }
+
+      var flow = state.flow[sym], flowState = null, flowZ = null, flowBuyShare = null, flowChartHtml;
+      if (flow && flow.stateArr[flow.stateArr.length - 1]) {
+        var fLastIdx = flow.stateArr.length - 1;
+        flowState = flow.stateArr[fLastIdx];
+        flowZ = flow.zArr[fLastIdx];
+        flowBuyShare = (flow.flowArr[fLastIdx] + 1) / 2 * 100;
+        // z-scores plotted on the shared -1..+1 scale (clipped at ±3σ), coloured by the direction each state points
+        flowChartHtml = trendSVG(
+          flow.zArr.slice(-TREND_CHART_POINTS).map(function (z) { return z === null ? 0 : Math.max(-1, Math.min(1, z / 3)); }),
+          flow.stateArr.slice(-TREND_CHART_POINTS).map(function (st) { return st ? Indicators.SIGNAL_DIRECTION.order_flow[st] : 0; })
+        );
+      } else {
+        flowChartHtml = trendSVG(null, null);
+      }
+      var flowLabel = flowState ? FLOW_LABELS[flowState] : "—";
+      var flowCls = flowState ? FLOW_CLASSES[flowState] : "neutral";
+      var flowArrow = flowState ? FLOW_ARROWS[flowState] : "●";
+      var flowColor = flowCls === "good" ? "var(--good)" : flowCls === "critical" ? "var(--critical)" : flowCls === "warning" ? "var(--warning)" : "var(--ink-muted)";
+      var tt = state.topTrader[sym], ttText = "—";
+      if (tt && tt.length >= 2) {
+        var ttNow = tt[tt.length - 1].ratio, ttThen = tt[0].ratio;
+        ttText = ttNow.toFixed(2) + (ttNow > ttThen ? " ▲" : ttNow < ttThen ? " ▼" : "");
       }
 
       var trendMultiHtml = TIMEFRAMES.map(function (tf, i) {
@@ -689,6 +738,11 @@
           adaptiveChartHtml +
           '<div class="trend-stats"><span>Fast <b>' + (adaptiveFastVal !== null ? "$" + fmtPrice(adaptiveFastVal) : "—") + '</b></span><span>Spread <b>' + (adaptiveSpreadPct !== null ? (adaptiveSpreadPct >= 0 ? "+" : "") + adaptiveSpreadPct.toFixed(2) + "%" : "—") + '</b></span></div>' +
         '</div>' +
+        '<div class="trend-panel">' +
+          '<div class="trend-head"><span>Order Flow</span><span class="trend-badge ' + flowCls + '">' + flowArrow + ' ' + flowLabel + '</span></div>' +
+          flowChartHtml +
+          '<div class="trend-stats"><span>Taker buys <b>' + (flowBuyShare !== null ? flowBuyShare.toFixed(1) + "%" : "—") + '</b></span><span>Pressure <b>' + (flowZ !== null ? (flowZ >= 0 ? "+" : "") + flowZ.toFixed(1) + "σ" : "—") + '</b></span><span>Top traders L/S <b>' + ttText + '</b></span></div>' +
+        '</div>' +
       '</div>';
 
       rowsHtml += '<tr>' +
@@ -696,6 +750,7 @@
         '<td style="color:' + (isGood ? "var(--good)" : "var(--critical)") + '">' + arrow + ' ' + Math.abs(change).toFixed(2) + '%</td>' +
         '<td style="color:' + (rvolClass === "good" ? "var(--good)" : rvolClass === "critical" ? "var(--critical)" : "inherit") + '">' + rvolText + '</td>' +
         '<td style="color:' + (oiPriceSignal.cls === "good" ? "var(--good)" : oiPriceSignal.cls === "critical" ? "var(--critical)" : oiPriceSignal.cls === "warning" ? "var(--warning)" : "var(--ink-muted)") + '">' + oiPriceSignal.arrow + ' ' + oiPriceSignal.label + ' <span style="color:var(--ink-muted);font-weight:400;">(' + oiSignalAge + ')</span></td>' +
+        '<td style="color:' + flowColor + '" title="' + (flowZ !== null ? "Pressure " + flowZ.toFixed(1) + "σ, taker buys " + flowBuyShare.toFixed(1) + "%" : "") + '">' + flowArrow + ' ' + flowLabel + '</td>' +
         '<td>$' + fmtVol(t.quoteVolume) + '</td>' +
         '<td>' + volShareText + '</td>' +
         trendMultiHtml +
@@ -754,6 +809,18 @@
   function fetchAllOpenInterest() {
     state.symbols.forEach(fetchOpenInterest);
     state.symbols.forEach(fetchOIHistory);
+    state.symbols.forEach(fetchTopTraders);
+  }
+
+  function fetchTopTraders(sym) {
+    var period = OI_PERIOD_MAP[state.timeframe.key] || "5m";
+    return fetch("https://fapi.binance.com/futures/data/topLongShortPositionRatio?symbol=" + sym + "&period=" + period + "&limit=" + CANDLE_COUNT)
+      .then(function (r) { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+      .then(function (rows) {
+        state.topTrader[sym] = rows.map(function (row) { return { t: row.timestamp, ratio: parseFloat(row.longShortRatio) }; });
+        render();
+      })
+      .catch(function () { /* keep previous reading on failure */ });
   }
 
   function fetchOIHistory(sym) {
@@ -776,6 +843,7 @@
           return {
             o: parseFloat(row[1]), h: parseFloat(row[2]), l: parseFloat(row[3]), c: parseFloat(row[4]),
             qv: parseFloat(row[7]), // quote-asset (USDT) volume for this candle
+            tbq: parseFloat(row[10]), // taker-buy quote volume — the aggressive-buy part of qv
             closeTime: row[6]
           };
         });
@@ -783,6 +851,7 @@
         state.candlesFull[sym] = candles;
         computeTrendForSymbol(sym);
         computeAdaptiveForSymbol(sym);
+        computeFlowForSymbol(sym);
         logSignals(sym);
         render();
       })
@@ -795,9 +864,10 @@
   var LOG_KEY = "signalLog.v1";
   var LOG_MAX_EVENTS = 5000;
   var LOG_HORIZONS = [1, 4, 12, 24];
-  var LOG_SIGNALS = ["trend", "adaptive", "oi_price"];
+  var LOG_SIGNALS = ["trend", "adaptive", "oi_price", "order_flow"];
   var LOG_COLUMNS = ["time", "symbol", "tf", "close", "signal", "value", "prev_value", "direction",
     "trend_consensus", "trend_conviction", "adaptive_spread_pct", "kinetic_dist_pct", "price_change_pct", "oi_change_pct",
+    "flow_z", "flow_buy_share_pct", "top_trader_ls_ratio",
     "funding_rate_pct", "rvol", "trend_preset", "adaptive_preset",
     "ret_1", "ret_4", "ret_12", "ret_24", "favourable_24", "adverse_24", "bars_held", "ret_held"];
 
@@ -825,7 +895,7 @@
 
   function logSignals(sym) {
     var candles = state.candlesFull[sym];
-    var trend = state.trend[sym], adaptive = state.adaptive[sym];
+    var trend = state.trend[sym], adaptive = state.adaptive[sym], flow = state.flow[sym];
     if (!candles || candles.length < CANDLE_COUNT + 2 || !trend || !adaptive) return;
     var tf = state.timeframe;
     var i = candles.length - 2; // last closed candle
@@ -840,13 +910,15 @@
     var values = {
       trend: trend.trendDirArr[i] === 1 ? "BULLISH" : trend.trendDirArr[i] === -1 ? "BEARISH" : "NEUTRAL",
       adaptive: adaptive.stateArr[i],
-      oi_price: Indicators.SIGNAL_DIRECTION.oi_price.hasOwnProperty(oiLabel) ? oiLabel : null
+      oi_price: Indicators.SIGNAL_DIRECTION.oi_price.hasOwnProperty(oiLabel) ? oiLabel : null,
+      order_flow: flow ? flow.stateArr[i] : null
     };
     // Only compare against the immediately preceding candle; after a gap (tab closed, timeframe
     // switched) we can't tell when a flip happened, so just take a fresh reading.
     var consecutive = prev && bar.closeTime - prev.closeTime === tf.ms;
     if (consecutive) {
       var p = state.premium[sym];
+      var tt = state.topTrader[sym];
       var rvol = relativeVolume(candles, CANDLE_COUNT);
       LOG_SIGNALS.forEach(function (sig) {
         var v = values[sig], was = prev.values[sig];
@@ -861,6 +933,9 @@
           kinetic_dist_pct: pct(bar.c, adaptive.kinetic[i]),
           price_change_pct: pct(bar.c, closed[closed.length - CANDLE_COUNT].c),
           oi_change_pct: oiHist && oiHist.length >= 2 ? pct(oiHist[oiHist.length - 1].oi, oiHist[0].oi) : null,
+          flow_z: flow ? flow.zArr[i] : null,
+          flow_buy_share_pct: flow && flow.flowArr[i] !== null ? (flow.flowArr[i] + 1) / 2 * 100 : null,
+          top_trader_ls_ratio: tt && tt.length ? tt[tt.length - 1].ratio : null,
           funding_rate_pct: p ? parseFloat(p.lastFundingRate) * 100 : null,
           rvol: rvol ? rvol.ratio : null,
           trend_preset: state.trendPreset, adaptive_preset: state.adaptivePreset
@@ -951,6 +1026,17 @@
     var closes = candles.map(function (c) { return c.c; });
     state.adaptive[sym] = computeAdaptiveTrend(closes, ADAPTIVE_PRESETS[state.adaptivePreset]);
   }
+  function computeFlowForSymbol(sym) {
+    var candles = state.candlesFull[sym];
+    if (!candles || candles.length < ORDER_FLOW_CONFIG.window + ORDER_FLOW_CONFIG.lookback) { state.flow[sym] = null; return; }
+    state.flow[sym] = computeOrderFlow(
+      candles.map(function (c) { return c.c; }),
+      candles.map(function (c) { return c.qv; }),
+      candles.map(function (c) { return c.tbq; }),
+      ORDER_FLOW_CONFIG
+    );
+  }
+
   function recomputeAllAdaptive() {
     state.symbols.forEach(computeAdaptiveForSymbol);
   }
@@ -1009,7 +1095,7 @@
   function setTimeframe(tf) {
     if (state.timeframe.key === tf.key) return;
     state.timeframe = tf;
-    state.spark = {}; state.candlesFull = {}; state.trend = {}; state.oiHistory = {}; state.oiSignalSince = {}; // old candles are a different interval — drop rather than mix
+    state.spark = {}; state.candlesFull = {}; state.trend = {}; state.oiHistory = {}; state.oiSignalSince = {}; state.flow = {}; state.topTrader = {}; // old candles are a different interval — drop rather than mix
     renderTfGroup();
     render();
     fetchAllKlines();
@@ -1038,6 +1124,7 @@
     fetchPremiumAndTicker();
     fetchOpenInterest(s);
     fetchOIHistory(s);
+    fetchTopTraders(s);
     fetchKlines(s);
     TIMEFRAMES.forEach(function (tf) { fetchTrendKlines(s, tf); });
   }
@@ -1046,6 +1133,7 @@
     state.symbols = state.symbols.filter(function (s) { return s !== sym; });
     delete state.premium[sym]; delete state.ticker[sym]; delete state.oi[sym]; delete state.spark[sym];
     delete state.candlesFull[sym]; delete state.trend[sym]; delete state.oiHistory[sym]; delete state.oiSignalSince[sym];
+    delete state.flow[sym]; delete state.topTrader[sym];
     delete state.closesByTf[sym]; delete state.trendMulti[sym]; delete state.adaptive[sym]; delete state.adaptiveMulti[sym];
     saveSymbols();
     render();

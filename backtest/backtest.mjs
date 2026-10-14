@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Replays the dashboard's three signals (Trend, Adaptive Trend, OI/Price) over Binance USD-M futures
+// Replays the dashboard's signals (Trend, Adaptive Trend, OI/Price, Order Flow) over Binance USD-M futures
 // history and measures what price did after each one. Uses the exact indicator code from
 // ../indicators.js, and Binance's public data archive (data.binance.vision), which has OI history
 // going back years — unlike the live openInterestHist endpoint's ~30 days.
@@ -175,6 +175,7 @@ function analyzeSymbol(sym, tf, candles, metrics, funding, analysisStart, cfg) {
   const closes = candles.map(c => c.c);
   const trend = Indicators.computeTrendSeries(closes, Indicators.TREND_PRESETS[cfg.trendPreset]);
   const adaptive = Indicators.computeAdaptiveTrend(closes, Indicators.ADAPTIVE_PRESETS[cfg.adaptivePreset]);
+  const flow = Indicators.computeOrderFlow(closes, candles.map(c => c.qv), candles.map(c => c.takerBuyQv), Indicators.ORDER_FLOW_CONFIG);
   const metricAt = alignAsOf(candles, metrics, Math.max(TF_MS[tf], 15 * 60e3));
   const fundingAt = alignAsOf(candles, funding, 9 * 3600e3);
   const n = candles.length;
@@ -214,6 +215,9 @@ function analyzeSymbol(sym, tf, candles, metrics, funding, analysisStart, cfg) {
       oi_price: oiLabel,
       price_change_pct: i >= OI_WINDOW - 1 ? (c.c / closes[i - OI_WINDOW + 1] - 1) * 100 : null,
       oi_change_pct: oiChangePct,
+      order_flow: flow.stateArr[i] || "Not enough data",
+      flow_z: flow.zArr[i],
+      flow_buy_share_pct: flow.flowArr[i] === null ? null : (flow.flowArr[i] + 1) / 2 * 100,
       open_interest: m ? m.oi : null,
       funding_rate_pct: f ? f.rate * 100 : null,
       top_trader_ls_ratio: m ? m.topTraderLs : null,
